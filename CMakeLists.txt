@@ -7,7 +7,22 @@ add_executable(mdrframe
     src/lower.cpp
     src/analysis.cpp
     src/print.cpp
+    src/verilog.cpp
+    src/verilog_lane.cpp
+    src/verilog_top.cpp
 )
+set(rtl_resources "")
+foreach(file IN ITEMS IM.v DM.v RF.v Promise.vh mips_tb.v)
+    set(path "${CMAKE_CURRENT_SOURCE_DIR}/rtl/${file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+    file(READ "${path}" bytes HEX)
+    string(REGEX REPLACE "(..)" "0x\\1," bytes "${bytes}")
+    string(MAKE_C_IDENTIFIER "${file}" name)
+    string(APPEND rtl_resources "inline constexpr unsigned char ${name}[] = {${bytes}};\n")
+endforeach()
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/rtl_resources.hpp"
+    CONTENT "#pragma once\nnamespace mdr::rtl {\n@rtl_resources@}\n" @ONLY)
+target_include_directories(mdrframe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_features(mdrframe PRIVATE cxx_std_20)
 set_target_properties(mdrframe PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
@@ -43,5 +58,24 @@ if(BUILD_TESTING)
         "tuse=2" "rf-address+candidate" "ready_by=M->W")
     check_output(conditional_ready conditional "tuse=1" "decode_enable=!"
         "ready_by=E->M" "ready_by=M->W")
+
+    find_program(MDR_IVERILOG iverilog)
+    find_program(MDR_VVP vvp)
+    if(MDR_IVERILOG AND MDR_VVP)
+        function(check_verilog name image dynamic)
+            add_test(NAME "${name}" COMMAND "${CMAKE_COMMAND}"
+                "-DMDRFRAME=$<TARGET_FILE:mdrframe>"
+                "-DIVERILOG=${MDR_IVERILOG}" "-DVVP=${MDR_VVP}"
+                "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/${name}"
+                "-DEXAMPLES=${CMAKE_CURRENT_SOURCE_DIR}/examples"
+                "-DIMAGE=${CMAKE_CURRENT_SOURCE_DIR}/tests/${image}.hex"
+                "-DTB=${CMAKE_CURRENT_SOURCE_DIR}/rtl/mips_tb.v"
+                "-DDYNAMIC=${dynamic}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_verilog.cmake"
+            )
+        endfunction()
+        check_verilog(rtl_p5 p5_smoke OFF)
+        check_verilog(rtl_dynamic dynamic_promise ON)
+    endif()
 endif()
 

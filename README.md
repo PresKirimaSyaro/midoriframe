@@ -1,6 +1,6 @@
 # mdrframe
 
-`mdrframe` 是五级顺序流水线指令 DSL 的 C++20 前端和中端。它读取单个 `.mdr` 指令集，输出带阶段的中间表示和依赖表。目标架构沿用 P5 的 F/D/E/M/W 流水线。当前输出可供后端使用，Verilog 工程生成和时序仿真属于后续工作。
+`mdrframe` 是五级顺序流水线指令 DSL 的 C++20 编译器。它读取单个 `.mdr` 指令集，可输出带阶段的中间表示、依赖表或 P5 Verilog 工程。
 
 ## 构建与运行
 
@@ -18,6 +18,20 @@ ctest --test-dir build --output-on-failure
 在其他环境可以省略 `-G` 或选择本机 CMake 生成器。默认输出完整 IR 到标准输出。`--emit=deps` 保留解释依赖所需的表达式，省去无关节点和源码坐标。若输入名没有扩展名且路径不存在，程序尝试附加 `.mdr`。显式提供路径时也可以读取先前的 `.dsl` 样例。
 
 P5 默认使用二参数整字写 `dm_write(addr, val)`，整字访存忽略地址低两位。若要分析早期 P6 样例中的字节或半字写，显式加 `--p6-narrow-writes`。
+
+## 生成和仿真 P5 工程
+
+```powershell
+.\build\mdrframe.exe --emit=verilog -o build\p5 --program tests\p5_smoke.hex examples\p5.mdr
+Push-Location build\p5
+iverilog -g2005 -s mips_tb -o sim.vvp -f files.f
+vvp sim.vvp
+Pop-Location
+```
+
+`-o` 指向生成目录。生成文件包括 `mips.v`、`ISA.v`、独立的 IM、DM、RF、Promise 定义、原 P5 的 `mips_tb.v` 和仿真文件清单。IM 有 4096 个 32 位字，起始地址为 `0x3000`。`--program` 将十六进制程序镜像复制为 `code.txt`。省略该选项时保留目录中已有的 `code.txt`，首次生成则填充零指令。请在生成目录中运行仿真，使 testbench 和 IM 能找到 `wave.vcd` 与 `code.txt` 的相对路径。
+
+DM 有 3072 个 32 位字，复位清零，支持整字写及整字、半字、字节读。`--p6-narrow-writes` 可用于 IR 和依赖分析，P5 Verilog 后端会拒绝窄写。寄存器写回和整字存储沿用 P5 日志格式。CMake 找到 `iverilog` 和 `vvp` 时，CTest 同时运行原 testbench 下的基础流水线和动态 Promise 回归。
 
 ## 输出约定
 
