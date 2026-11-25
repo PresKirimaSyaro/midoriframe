@@ -1,0 +1,27 @@
+// D resolves the path. The destination is the same for both paths.
+load_or_add {
+    match(ins[31:26] == 6'h3e);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    off: 16 = ins[15:0];
+    load: 1;
+    addr: 32;
+
+    D {
+        load = ins[0];
+        update 32'd1 << rt;
+    }
+    E {
+        if (load) {
+            addr = grf_read(rs) + {{16{off[15]}}, off};
+        } else {
+            yield grf_read(rs) + grf_read(rt);
+        }
+    }
+    M {
+        if (load) {
+            yield dm_read(addr, 4);
+        }
+    }
+}
+

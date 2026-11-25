@@ -1,0 +1,224 @@
+// P5 RTL base. Internal IM/DM, module mips(clk, reset).
+
+add {
+    match((ins & 32'hfc00003f) == 32'h00000020);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+
+    D {
+        update 32'd1 << rd;
+    }
+
+    E {
+        yield grf_read(rs) + grf_read(rt);
+    }
+}
+
+sub {
+    match((ins & 32'hfc00003f) == 32'h00000022);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+
+    D {
+        update 32'd1 << rd;
+    }
+
+    E {
+        yield grf_read(rs) - grf_read(rt);
+    }
+}
+
+or {
+    match((ins & 32'hfc00003f) == 32'h00000025);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+
+    D {
+        update 32'd1 << rd;
+    }
+
+    E {
+        yield grf_read(rs) | grf_read(rt);
+    }
+}
+
+sllv {
+    match((ins & 32'hfc00003f) == 32'h00000004);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+
+    D {
+        update 32'd1 << rd;
+    }
+
+    E {
+        yield grf_read(rt) << (grf_read(rs) & 32'd31);
+    }
+}
+
+sll {
+    match((ins & 32'hfc00003f) == 32'h00000000);
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+    shamt: 5 = ins[10:6];
+
+    D {
+        update 32'd1 << rd;
+    }
+
+    E {
+        yield grf_read(rt) << shamt;
+    }
+}
+
+addi {
+    match((ins & 32'hfc000000) == 32'h20000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+
+    D {
+        update 32'd1 << rt;
+    }
+
+    E {
+        yield grf_read(rs) + {{16{imm[15]}}, imm};
+    }
+}
+
+ori {
+    match((ins & 32'hfc000000) == 32'h34000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+
+    D {
+        update 32'd1 << rt;
+    }
+
+    E {
+        yield grf_read(rs) | {16'd0, imm};
+    }
+}
+
+lui {
+    match((ins & 32'hfc000000) == 32'h3c000000);
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+
+    D {
+        update 32'd1 << rt;
+    }
+
+    E {
+        yield {imm, 16'd0};
+    }
+}
+
+lw {
+    match((ins & 32'hfc000000) == 32'h8c000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+    addr: 32;
+
+    D {
+        update 32'd1 << rt;
+    }
+
+    E {
+        addr = grf_read(rs) + {{16{imm[15]}}, imm};
+    }
+
+    M {
+        x: 32 = dm_read(addr, 4);
+        yield x;
+    }
+}
+
+sw {
+    match((ins & 32'hfc000000) == 32'hac000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+    addr: 32;
+
+    E {
+        addr = grf_read(rs) + {{16{imm[15]}}, imm};
+    }
+
+    M {
+        dm_write(addr, grf_read(rt));
+    }
+}
+
+beq {
+    match((ins & 32'hfc000000) == 32'h10000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+
+    D {
+        if (grf_read(rs) == grf_read(rt)) {
+            jump(pc + 32'd4 + {{14{imm[15]}}, imm, 2'b00});
+        }
+    }
+}
+
+bne {
+    match((ins & 32'hfc000000) == 32'h14000000);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    imm: 16 = ins[15:0];
+
+    D {
+        if (grf_read(rs) != grf_read(rt)) {
+            jump(pc + 32'd4 + {{14{imm[15]}}, imm, 2'b00});
+        }
+    }
+}
+
+j {
+    match((ins & 32'hfc000000) == 32'h08000000);
+
+    D {
+        pc4: 32 = pc + 32'd4;
+        jump({pc4[31:28], ins[25:0], 2'b00});
+    }
+}
+
+jal {
+    match((ins & 32'hfc000000) == 32'h0c000000);
+
+    D {
+        pc4: 32 = pc + 32'd4;
+        jump({pc4[31:28], ins[25:0], 2'b00});
+        update 32'h80000000;
+        yield pc + 32'd8;
+    }
+}
+
+jr {
+    match((ins & 32'hfc00003f) == 32'h00000008);
+    rs: 5 = ins[25:21];
+
+    D {
+        jump(grf_read(rs));
+    }
+}
+
+jalr {
+    match((ins & 32'hfc00003f) == 32'h00000009);
+    rs: 5 = ins[25:21];
+    rd: 5 = ins[15:11];
+
+    D {
+        jump(grf_read(rs));
+        update 32'd1 << rd;
+        yield pc + 32'd8;
+    }
+}

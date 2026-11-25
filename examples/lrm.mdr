@@ -1,0 +1,21 @@
+lrm {
+    match((ins & 32'hfc000000) == 32'hcc000000);
+    rs: 5 = ins[25:21];
+    imm: 16 = ins[15:0];
+    addr: 32;
+    rt: 5 = ins[20:16];
+
+    D {
+        update 32'hffff_ffff;
+    }
+
+    E {
+        addr = grf_read(rs) + {{16{imm[15]}}, imm};
+    }
+
+    M {
+        yield grf_read(rt);
+        x: 32 = dm_read(addr, 4);
+        update 32'd1 << x[4:0];
+    }
+}
