@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -36,6 +37,8 @@ struct Expr {
 
 enum class StmtKind { Declare, Assign, If, For, Update, Yield, Effect };
 
+enum class LoopComparison { Less, LessEqual, Greater, GreaterEqual };
+
 struct Stmt {
     StmtKind kind;
     Location location;
@@ -45,12 +48,15 @@ struct Stmt {
     ExprId third = noExpr;
     std::vector<Stmt> body;
     std::vector<Stmt> otherwise;
+    LoopComparison loopComparison = LoopComparison::Less;
+    bool subtractStep = false;
 };
 
 enum class Stage : int { Decode = -1, D, E, M, W };
 const char* stageName(Stage stage);
 
 struct StageBlock {
+    std::size_t outerDeclarationCount;
     Stage stage;
     std::vector<Stmt> statements;
 };

@@ -175,9 +175,9 @@ private:
                 auto stage = item.text == "D" ? Stage::D : item.text == "E" ? Stage::E : Stage::M;
                 if (stage <= previous) throw Error(item.location, "expected stage blocks in D, E, M order, at most once each");
                 previous = stage;
-                result.stages.push_back({stage, block()});
+                result.stages.push_back({result.declarations.size(), stage, block()});
             } else {
-                if (previous != Stage::Decode || current_.text != ":")
+                if (current_.text != ":")
                     throw Error(item.location, "expected match, outer declaration, or stage block");
                 result.declarations.push_back(declaration(item));
             }
@@ -227,13 +227,18 @@ private:
             result.first = expression();
             expect(";");
             expect(result.name);
-            expect("<");
+            if (accept("<")) result.loopComparison = LoopComparison::Less;
+            else if (accept("<=")) result.loopComparison = LoopComparison::LessEqual;
+            else if (accept(">")) result.loopComparison = LoopComparison::Greater;
+            else if (accept(">=")) result.loopComparison = LoopComparison::GreaterEqual;
+            else throw Error(current_.location, "expected '<', '<=', '>', or '>=' in loop condition");
             result.second = expression();
             expect(";");
             expect(result.name);
             expect("=");
             expect(result.name);
-            expect("+");
+            result.subtractStep = accept("-");
+            if (!result.subtractStep) expect("+");
             result.third = expression();
             expect(")");
             result.body = controlBody();

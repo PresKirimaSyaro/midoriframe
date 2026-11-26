@@ -41,7 +41,15 @@ public:
             throw Error(at, "match requires a one-bit expression derived from ins and constants");
         for (const auto& stmt : source_.declarations)
             if (!beforeMatch(stmt)) declare(stmt);
+        // Decode aliases are checked above. Each stage sees only declarations
+        // that precede it, while its assignments carry forward to later stages.
+        auto pending = std::exchange(scopes_.front(), Scope{});
+        std::size_t visibleDeclarations = 0;
         for (const auto& stage : source_.stages) {
+            while (visibleDeclarations < stage.outerDeclarationCount) {
+                const auto& stmt = source_.declarations[visibleDeclarations++];
+                scopes_.front().insert(pending.extract(stmt.name));
+            }
             stage_ = stage.stage;
             block(stage.statements);
         }
@@ -468,15 +476,28 @@ private:
     void loop(const Stmt& stmt) {
         const auto start = constants_.integer(expression(stmt.first), stmt.location, "loop start");
         const auto end = constants_.integer(expression(stmt.second), stmt.location, "loop limit");
-        const auto step = constants_.integer(expression(stmt.third), stmt.location, "loop step");
-        if (step <= 0) throw Error(stmt.location, "loop step must be positive");
+        const auto magnitude = constants_.integer(expression(stmt.third), stmt.location, "loop step");
+        if (magnitude <= 0) throw Error(stmt.location, "loop step magnitude must be positive");
         constexpr auto low = std::numeric_limits<std::int32_t>::min();
         constexpr auto high = std::numeric_limits<std::int32_t>::max();
-        if (start < low || start > high || end < low || end > high || step > high)
-            throw Error(stmt.location, "loop bounds must fit a signed 32-bit integer");
-        for (auto i = start; i < end; i += step) {
+        if (start < low || start > high || end < low || end > high || magnitude > high)
+            throw Error(stmt.location, "loop bounds and step must fit a signed 32-bit integer");
+
+        const bool ascending = stmt.loopComparison == LoopComparison::Less ||
+                               stmt.loopComparison == LoopComparison::LessEqual;
+        const bool inclusive = stmt.loopComparison == LoopComparison::LessEqual ||
+                               stmt.loopComparison == LoopComparison::GreaterEqual;
+        auto continues = [&](std::int64_t index) {
+            return (inclusive && index == end) || (ascending ? index < end : index > end);
+        };
+        if (!continues(start)) return;
+        if (ascending == stmt.subtractStep)
+            throw Error(stmt.location, "loop step moves away from its termination bound");
+        const auto step = stmt.subtractStep ? -magnitude : magnitude;
+        for (auto i = start; continues(i); i += step) {
             if (++iterations_ > maxIterations) throw Error(stmt.location, "static loop expansion exceeds compiler limit");
-            if (i + step > high) throw Error(stmt.location, "loop increment overflows its index");
+            if (i + step < low || i + step > high)
+                throw Error(stmt.location, "loop step overflows its index");
             scopes_.emplace_back();
             const auto text = "32'sd" + std::to_string(static_cast<std::uint32_t>(i));
             const auto index = make("literal", text, {32, true}, stmt.location);
