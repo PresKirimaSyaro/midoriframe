@@ -59,6 +59,12 @@ if(BUILD_TESTING)
     check_output(conditional_ready conditional "tuse=1" "decode_enable=!"
         "ready_by=E->M" "ready_by=M->W")
 
+    add_test(NAME control_bodies COMMAND "${CMAKE_COMMAND}"
+        "-DMDRFRAME=$<TARGET_FILE:mdrframe>"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/control-bodies"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_control_bodies.cmake"
+    )
+
     add_test(NAME memory_stage COMMAND "${CMAKE_COMMAND}"
         "-DMDRFRAME=$<TARGET_FILE:mdrframe>"
         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/memory-stage"

@@ -43,6 +43,10 @@ python tests/compare_p5.py --mdrframe build/mdrframe.exe --p5 D:/Dcode/co/p5
 
 脚本给两个实现加载同一份指令镜像，复位后逐拍比较取指 PC、D 级指令和 `stall`，并比较同拍的寄存器与内存写入。脚本使用独立监视 testbench，原工程的文件直接复制到测试目录。日志保存于 `build/p5-diff/`。
 
+## 控制流语法
+
+`if`、`else` 和 `for` 的主体可以写成一条语句，也可以用大括号包含多条语句。单条语句仍有自己的作用域。嵌套 `if` 中，`else` 与最近的尚未匹配的 `if` 绑定。D、E、M 流水级必须使用大括号。
+
 ## 输出约定
 
 - `priority` 按源文件顺序编号，首个命中者生效。译码未命中时无副作用。

@@ -201,6 +201,13 @@ private:
         return statements;
     }
 
+    std::vector<Stmt> controlBody() {
+        if (current_.text == "{") return block();
+        std::vector<Stmt> statements;
+        statements.push_back(statement());
+        return statements;
+    }
+
     Stmt statement() {
         auto token = name();
         Stmt result{StmtKind::Effect, token.location, token.text, noExpr, noExpr, noExpr, {}, {}};
@@ -210,11 +217,8 @@ private:
             expect("(");
             result.first = expression();
             expect(")");
-            result.body = block();
-            if (accept("else")) {
-                if (current_.text == "if") result.otherwise.push_back(statement());
-                else result.otherwise = block();
-            }
+            result.body = controlBody();
+            if (accept("else")) result.otherwise = controlBody();
         } else if (token.text == "for") {
             result.kind = StmtKind::For;
             expect("(");
@@ -232,7 +236,7 @@ private:
             expect("+");
             result.third = expression();
             expect(")");
-            result.body = block();
+            result.body = controlBody();
         } else if (token.text == "update" || token.text == "yield") {
             result.kind = token.text == "update" ? StmtKind::Update : StmtKind::Yield;
             result.first = expression();
