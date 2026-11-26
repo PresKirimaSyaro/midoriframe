@@ -86,3 +86,122 @@ CMake 找到 Icarus Verilog 时，CTest 会运行生成工程的仿真测试。�
 python tests/compare_p5.py --mdrframe build/mdrframe --p5 /path/to/handwritten-p5
 ```
 
+## 练习题示例
+
+下面把 P5 题目的行为 RTL 和对应的 MDR 放在一起。RTL 里的 `GRF` 表示旧寄存器值，`DM` 按字索引，`PC` 是本条指令地址，`next_pc` 是延迟槽后的取指地址。每段 MDR 都可以保存成单独的 `.mdr` 文件，也可以加到 [P5 基础指令集](examples/p5.mdr) 中。更多题例见 [SPEC.md](SPEC.md)。
+
+### P5-Q02 · bgezall
+
+编码为 `110000 rs 00000 offset16`。总是将 `PC+8` 写入 `$31`。`rs` 为非负有符号数时保留延迟槽并跳转；否则清槽。
+
+**题面 RTL**
+
+```verilog
+GRF[31] <= PC + 32'd8;
+if ($signed(GRF[rs]) >= 0)
+    next_pc = PC + 32'd4 + {{14{offset[15]}}, offset, 2'b00};
+else begin
+    annul_slot = 1'b1;
+    next_pc = PC + 32'd8;
+end
+```
+
+**对应的 MDR**
+
+```mdr
+bgezall {
+    match(ins[31:26] == 6'b110000 && ins[20:16] == 5'd0);
+    rs: 5 = ins[25:21];
+    off: 16 = ins[15:0];
+    D {
+        update 32'd1 << 5'd31;
+        yield pc + 32'd8;
+        if (signed(grf_read(rs)) >= 32'sd0)
+            jump(pc + 32'd4 + {{14{off[15]}}, off, 2'b00});
+        else
+            annul_delay_slot();
+    }
+}
+```
+
+### P5-Q20 · ccc
+
+编码为 `000000 rs rt rd 00000 110101`。比较 `rs` 的前导零数与 `rt` 的前导一数。前者严格更大时取 `rs` 的高半字与 `rt` 的低半字，否则交换来源。
+
+**题面 RTL**
+
+```verilog
+zeros = 0; ones = 0; stop_rs = 0; stop_rt = 0;
+for (i = 31; i >= 0; i = i - 1) begin
+    if (!stop_rs && !a[i]) zeros = zeros + 1;
+    else stop_rs = 1;
+    if (!stop_rt && b[i]) ones = ones + 1;
+    else stop_rt = 1;
+end
+GRF[rd] <= zeros > ones ? {a[31:16], b[15:0]} : {b[31:16], a[15:0]};
+```
+
+这里 `a = GRF[rs]`，`b = GRF[rt]`。计数最大为 32，使用 6 位即可。
+
+**对应的 MDR**
+
+```mdr
+ccc {
+    match(ins[31-:6] == 6'd0 && ins[10:6] == 5'd0 && ins[0+:6] == 6'h35);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+    D { update 32'd1 << rd; }
+    E {
+        a: 32 = grf_read(rs);
+        b: 32 = grf_read(rt);
+        zeros: 6 = 0;
+        ones: 6 = 0;
+        stop_rs: 1 = 0;
+        stop_rt: 1 = 0;
+        for (i = 31; i >= 0; i = i - 1) {
+            if (!stop_rs && !a[i]) zeros = zeros + 1;
+            else stop_rs = 1;
+            if (!stop_rt && b[i]) ones = ones + 1;
+            else stop_rt = 1;
+        }
+        yield zeros > ones ? {a[31:16], b[15:0]} : {b[31:16], a[15:0]};
+    }
+}
+```
+
+### P5-M10 · lwxsel
+
+编码为 `110111 base rt offset16`。偏移量以字为单位。把读出的字与旧 `rt` 异或。如果最高位为 1 就写 `rt`，否则用异或结果的低四位决定目的寄存器。两条路径都写原始读数。
+
+**题面 RTL**
+
+```verilog
+address = GRF[base] + {{14{offset[15]}}, offset, 2'b00};
+word = DM[address[31:2]];
+mixed = word ^ GRF[rt];
+if (mixed[31]) GRF[rt] <= word;
+else GRF[mixed[3:0]] <= word;
+```
+
+**对应的 MDR**
+
+```mdr
+lwxsel {
+    match(ins[31-:6] == 6'b11_0111);
+    base: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    off: 16 = ins[15:0];
+    D { update (32'd1 << rt) | 32'h0000_ffff; }
+
+    addr: 32;
+    E { addr = grf_read(base) + {{14{off[15]}}, off, 2'b00}; }
+    M {
+        word: 32 = dm_read(addr, 4);
+        mixed: 32 = word ^ grf_read(rt);
+        yield word;
+        if (mixed[31]) update 32'd1 << rt;
+        else update 32'd1 << mixed[3:0];
+    }
+}
+```
