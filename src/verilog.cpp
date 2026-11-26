@@ -2,7 +2,6 @@
 #include "rtl_resources.hpp"
 
 #include <algorithm>
-#include <bit>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -31,16 +30,24 @@ std::string readImage(const std::filesystem::path& file) {
 }
 
 // Release the obsolete generated controller when regenerating a v0.1 directory.
-bool hasGeneratedLegacyController(const std::filesystem::path& directory) {
+std::string_view legacyController(const std::filesystem::path& directory) {
     std::ifstream manifest(directory / "files.f", std::ios::binary);
     const std::string files{std::istreambuf_iterator<char>(manifest), std::istreambuf_iterator<char>()};
-    if (files != "mips.v\nISA.v\nIM.v\nDM.v\nRF.v\nmips_tb.v\n") return false;
-
-    std::ifstream old(directory / "ISA.v", std::ios::binary);
-    const std::string controller{std::istreambuf_iterator<char>(old), std::istreambuf_iterator<char>()};
-    return controller.starts_with("`include \"Promise.vh\"\n") &&
-           (controller.find("\nmodule ISA(\n") != std::string::npos ||
-            controller.find("\nmodule mdr_instruction_0(\n") != std::string::npos);
+    if (files == "mips.v\nISA.v\nIM.v\nDM.v\nRF.v\nmips_tb.v\n") {
+        std::ifstream old(directory / "ISA.v", std::ios::binary);
+        const std::string controller{std::istreambuf_iterator<char>(old), std::istreambuf_iterator<char>()};
+        if (controller.starts_with("`include \"Promise.vh\"\n") &&
+            (controller.find("\nmodule ISA(\n") != std::string::npos ||
+             controller.find("\nmodule mdr_instruction_0(\n") != std::string::npos))
+            return "ISA.v";
+    }
+    if (files == "mips.v\nController.v\nFDreg.v\nDEreg.v\nEMreg.v\nMWreg.v\nIM.v\nDM.v\nRF.v\nmips_tb.v\n") {
+        std::ifstream old(directory / "Controller.v", std::ios::binary);
+        const std::string controller{std::istreambuf_iterator<char>(old), std::istreambuf_iterator<char>()};
+        if (controller.starts_with("`include \"Promise.vh\"\n\nmodule Controller(\n"))
+            return "Controller.v";
+    }
+    return {};
 }
 
 
@@ -57,9 +64,8 @@ std::string hex32(std::uint32_t value) {
 void emitVerilog(const ModuleIR& module, const std::filesystem::path& directory,
                  const std::filesystem::path& programImage) {
     const auto ports = std::max(1u, module.readUpperBound);
-    const auto opcodeBits = static_cast<unsigned>(std::bit_width(module.instructions.size()));
-    rtl::PipelineLayout layout{opcodeBits, ports};
-    const auto controller = rtl::controller(module, layout);
+    rtl::PipelineLayout layout{ports};
+    const auto controllers = rtl::controllers(module, layout);
     const auto top = rtl::top(layout);
     const auto installImage = !programImage.empty() || !std::filesystem::exists(directory / "code.txt");
     std::string image;
@@ -69,10 +75,13 @@ void emitVerilog(const ModuleIR& module, const std::filesystem::path& directory,
         for (unsigned i = 0; i < 4096; ++i) image += "00000000\n";
     }
 
-    const bool replaceLegacy = hasGeneratedLegacyController(directory);
+    const auto obsolete = legacyController(directory);
     std::filesystem::create_directories(directory);
     writeFile(directory / "mips.v", top);
-    writeFile(directory / "Controller.v", controller);
+    writeFile(directory / "DCtrl.v", controllers[0]);
+    writeFile(directory / "ECtrl.v", controllers[1]);
+    writeFile(directory / "MCtrl.v", controllers[2]);
+    writeFile(directory / "STALL.v", resource(rtl::STALL_v));
     writeFile(directory / "IM.v", resource(rtl::IM_v));
     writeFile(directory / "DM.v", resource(rtl::DM_v));
     writeFile(directory / "RF.v", resource(rtl::RF_v));
@@ -82,9 +91,9 @@ void emitVerilog(const ModuleIR& module, const std::filesystem::path& directory,
     writeFile(directory / "MWreg.v", resource(rtl::MWreg_v));
     writeFile(directory / "Promise.vh", resource(rtl::Promise_vh));
     writeFile(directory / "mips_tb.v", resource(rtl::mips_tb_v));
-    writeFile(directory / "files.f", "mips.v\nController.v\nFDreg.v\nDEreg.v\nEMreg.v\nMWreg.v\nIM.v\nDM.v\nRF.v\nmips_tb.v\n");
+    writeFile(directory / "files.f", "mips.v\nDCtrl.v\nECtrl.v\nMCtrl.v\nSTALL.v\nFDreg.v\nDEreg.v\nEMreg.v\nMWreg.v\nIM.v\nDM.v\nRF.v\nmips_tb.v\n");
     if (installImage) writeFile(directory / "code.txt", image);
-    if (replaceLegacy) std::filesystem::remove(directory / "ISA.v");
+    if (!obsolete.empty()) std::filesystem::remove(directory / obsolete);
 }
 
 } // namespace mdr

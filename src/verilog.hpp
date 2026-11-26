@@ -2,6 +2,7 @@
 
 #include "ir.hpp"
 
+#include <array>
 #include <filesystem>
 #include <string>
 
@@ -12,13 +13,12 @@ void emitVerilog(const ModuleIR& module, const std::filesystem::path& directory,
 
 namespace rtl {
 struct PipelineLayout {
-    unsigned opBits;
     unsigned rfPorts;
     unsigned deBits = 1;
     unsigned emBits = 1;
 };
 
-std::string controller(const ModuleIR& module, PipelineLayout& layout);
+std::array<std::string, 3> controllers(const ModuleIR& module, PipelineLayout& layout);
 std::string top(const PipelineLayout& layout);
 std::string hex32(std::uint32_t value);
 }

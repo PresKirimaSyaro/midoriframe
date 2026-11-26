@@ -5,6 +5,7 @@
 #include <array>
 #include <map>
 #include <sstream>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -49,16 +50,18 @@ private:
 };
 
 
+struct Drive {
+    std::string guard;
+    std::string value;
+};
+
 struct InstructionCode {
     std::string name;
-    std::string match;
-    std::string localDeclarations;
-    std::string procedures;
-    std::string requests;
-    std::string control;
-    std::string memory;
-    std::array<std::string, 3> promise;
-    std::array<std::string, 2> payload;
+    std::array<std::string, 3> match, localDeclarations, procedures, promise;
+    std::array<std::vector<Drive>, 3> requests;
+    std::vector<Drive> jumps, annuls, addresses, stores;
+    std::array<std::vector<std::string>, 2> payload;
+    std::array<std::vector<Drive>, 2> payloadDrivers;
     std::array<unsigned, 2> payloadBits{};
 };
 
@@ -78,18 +81,21 @@ struct PromiseNames {
 
 class InstructionEmitter {
 public:
-    InstructionEmitter(const InstructionIR& ir, SharedLogic& shared)
+    InstructionEmitter(const InstructionIR& ir, std::array<SharedLogic, 3>& shared)
         : ir_(ir), prefix_("i_" + ir.name + "_"), shared_(shared), constants_(ir) {}
 
     InstructionCode run() {
         code_.name = ir_.name;
-        code_.match = truth(get(ir_.match, Stage::D));
+        for (auto stage : {Stage::D, Stage::E, Stage::M})
+            code_.match[static_cast<unsigned>(stage)] = truth(get(ir_.match, stage));
         requests();
         control();
         memory();
         for (auto stage : {Stage::D, Stage::E, Stage::M}) promise(stage);
-        code_.localDeclarations = declarations_.str();
-        code_.procedures = procedures_.str();
+        for (std::size_t stage = 0; stage < code_.match.size(); ++stage) {
+            code_.localDeclarations[stage] = declarations_[stage].str();
+            code_.procedures[stage] = procedures_[stage].str();
+        }
         return std::move(code_);
     }
 
@@ -97,8 +103,8 @@ public:
 private:
     const Value& node(ValueId id) const { return ir_.value(id); }
 
-    std::string wire(Type type, const std::string& expression) {
-        return shared_.wire(type, expression);
+    std::string wire(Stage stage, Type type, const std::string& expression) {
+        return shared_[static_cast<unsigned>(stage)].wire(type, expression);
     }
     std::string carry(Type type, const std::string& expression, Stage destination) {
         const auto index = static_cast<unsigned>(destination) - 1;
@@ -106,9 +112,8 @@ private:
         const auto part = "[" + std::to_string(code_.payloadBits[index]) +
             " +: " + std::to_string(type.width) + "]";
         code_.payloadBits[index] += type.width;
-        code_.payload[index] += "                next_" + std::string(bank) + part +
-            " = " + expression + ";\n";
-        return wire(type, std::string(bank) + part);
+        code_.payload[index].push_back(expression);
+        return wire(destination, type, std::string(bank) + part);
     }
 
 
@@ -124,7 +129,7 @@ private:
         std::string name;
         if (v.stage >= Stage::D && v.stage < stage && (v.sources & runtimeSources)) {
             if (width != v.type.width || effective.isSigned != v.type.isSigned) {
-                name = wire(effective, cast(get(id, stage), effective.isSigned));
+                name = wire(stage, effective, cast(get(id, stage), effective.isSigned));
             } else {
                 const auto previous = static_cast<Stage>(static_cast<int>(stage) - 1);
                 name = carry(v.type, get(id, previous), stage);
@@ -138,7 +143,7 @@ private:
 
     std::string read(ValueId id, Stage stage) {
         const auto address = get(node(id).operands[0], stage);
-        return wire({32}, "rf_lookup(" + address + ", " + stageTag(stage) + "_rf_values)");
+        return wire(stage, {32}, "rf_lookup(" + address + ", rf_values)");
     }
     std::string partRange(const Value& v, Stage stage) {
         const auto index = get(v.operands[1], stage);
@@ -148,14 +153,41 @@ private:
         return '[' + index + " +: " + std::to_string(v.type.width) + ']';
     }
 
+    std::string instructionSlice(const Value& value, Stage stage) {
+        const auto& args = value.operands;
+        if (node(args[0]).op != "ins") return {};
+        const auto start = constants_.get(args[1]);
+        if (!start || *start >= 32) return {};
+
+        const auto width = value.type.width;
+        unsigned low = static_cast<unsigned>(*start);
+        if (value.op == "slice" || value.detail == "-:") {
+            if (low + 1 < width) return {};
+            low -= width - 1;
+        }
+        if (width > 32 - low) return {};
+        const auto high = low + width - 1;
+        const auto range = width == 1 ? std::to_string(low) :
+            std::to_string(high) + ":" + std::to_string(low);
+        std::string name = "ir_" + std::to_string(high) + "_" + std::to_string(low);
+        if (high == 25 && low == 21) name = "rs";
+        if (high == 20 && low == 16) name = "rt";
+        if (high == 15 && low == 11) name = "rd";
+        if (high == 31 && low == 26) name = "opcode";
+        if (high == 5 && low == 0) name = "funct";
+        if (high == 15 && low == 0) name = "imm16";
+        return shared_[static_cast<unsigned>(stage)].wire({width}, "IR[" + range + "]", name);
+    }
+
+
     std::string evaluate(ValueId id, Stage stage, Type type) {
         const auto& v = node(id);
         const auto& a = v.operands;
         auto self = [&](std::size_t operand) { return get(a[operand], stage); };
         auto sized = [&](std::size_t operand) { return get(a[operand], stage, type); };
-        auto emit = [&](const std::string& expression) { return wire(type, expression); };
+        auto emit = [&](const std::string& expression) { return wire(stage, type, expression); };
 
-        if (v.op == "ins" || v.op == "pc") return emit(cast(stageTag(stage) + '_' + v.op, type.isSigned));
+        if (v.op == "ins" || v.op == "pc") return emit(cast(v.op == "ins" ? "IR" : "PC", type.isSigned));
         if (v.op == "literal") return emit(cast(v.detail, type.isSigned));
         if (v.op == "undef") return emit(std::to_string(type.width) + "'bx");
         if (v.op == "grf.read") return emit(cast(read(id, stage), type.isSigned));
@@ -175,7 +207,7 @@ private:
             const auto rhs = get(a[0], stage, argType);
             if (node(a[0]).type.width <= v.type.width && !argType.isSigned &&
                     type.width == v.type.width && !type.isSigned) return rhs;
-            const auto raw = wire(v.type, rhs);
+            const auto raw = wire(stage, v.type, rhs);
             return emit(cast(raw, type.isSigned));
         }
         if (v.op == "signed") return emit(cast(self(0), type.isSigned));
@@ -196,24 +228,16 @@ private:
         }
         if (v.op == "phi") {
             // A procedural if treats X as false and each assigned arm is already fitted.
-            const auto raw = wire(v.type, truth(self(0)) + " ? " + self(1) + " : " + self(2));
+            const auto raw = wire(stage, v.type, truth(self(0)) + " ? " + self(1) + " : " + self(2));
             return emit(cast(raw, type.isSigned));
         }
         if (v.op == "select") return emit(self(0) + " ? " + sized(1) + " : " + sized(2));
-        if (v.op == "slice" && node(a[0]).op == "ins" && v.type.width == 5) {
-            const auto high = constants_.get(a[1]);
-            const char* field = high == 25 ? "rs" : high == 20 ? "rt" : high == 15 ? "rd" : nullptr;
-            if (field) {
-                const auto tag = stageTag(stage);
-                const auto source = tag + "_ins[" + std::to_string(*high) + ":"
-                    + std::to_string(*high - 4) + "]";
-                const auto signal = shared_.wire({5}, source, tag + "_" + field);
-                if (type.width == 5 && !type.isSigned) return signal;
-                return emit(cast(signal, type.isSigned));
-            }
+        if (detail::isOneOf(v.op, {"bit", "slice", "indexed"})) {
+            const auto slice = instructionSlice(v, stage);
+            if (slice.empty()) return emit(cast(self(0) + partRange(v, stage), type.isSigned));
+            if (type.width == v.type.width && !type.isSigned) return slice;
+            return emit(cast(slice, type.isSigned));
         }
-        if (detail::isOneOf(v.op, {"bit", "slice", "indexed"}))
-            return emit(cast(self(0) + partRange(v, stage), type.isSigned));
         if (v.op == "concat") {
             std::string expression = "{";
             for (std::size_t i = 0; i < a.size(); ++i) {
@@ -232,8 +256,8 @@ private:
             const auto rhs = self(1);
             const auto range = partRange(part, stage);
             const auto temp = prefix_ + "part" + std::to_string(++signal_);
-            declarations_ << "    reg " << bits(v.type) << temp << ";\n";
-            procedures_ << "    always @* begin\n        " << temp << " = " << old << ";\n"
+            declarations_[static_cast<unsigned>(stage)] << "    reg " << bits(v.type) << temp << ";\n";
+            procedures_[static_cast<unsigned>(stage)] << "    always @* begin\n        " << temp << " = " << old << ";\n"
                         << "        " << temp << range << " = " << rhs << ";\n    end\n";
             return emit(cast(temp, type.isSigned));
         }
@@ -253,36 +277,23 @@ private:
     }
 
     void requests() {
-        for (auto use : {Stage::D, Stage::E, Stage::M}) {
-            std::string expression = "32'd0";
-            for (const auto& rf : ir_.reads) {
-                if (rf.use != use) continue;
-                expression += " | ((" + guard(rf.decodeEnable, Stage::D) + ") ? (32'd1 << " +
-                    get(rf.address, Stage::D) + ") : 32'd0)";
-            }
-            code_.requests += "                req_" + stageTag(use) + " = " + expression + ";\n";
+        for (const auto& rf : ir_.reads) {
+            code_.requests[static_cast<unsigned>(rf.use)].push_back(
+                {guard(rf.decodeEnable, Stage::D), "32'd1 << " + get(rf.address, Stage::D)});
         }
     }
 
     void control() {
-        std::string redirect = "1'b0", annul = "1'b0", destination = "32'd0";
         for (const auto& e : ir_.effects) {
             if (e.op == "jump") {
-                const auto target = get(e.operands[0], Stage::D);
-                const auto condition = guard(e.guard, Stage::D);
-                redirect += " || (" + condition + ')';
-                destination = "(" + condition + ") ? " + target + " : (" + destination + ')';
+                code_.jumps.push_back({guard(e.guard, Stage::D), get(e.operands[0], Stage::D)});
             } else if (e.op == "annul_delay_slot") {
-                annul += " || (" + guard(e.guard, Stage::D) + ')';
+                code_.annuls.push_back({guard(e.guard, Stage::D), ""});
             }
         }
-        code_.control = "                do_jump = " + redirect + ";\n" +
-            "                do_annul = " + annul + ";\n" +
-            "                dest = " + destination + ";\n";
     }
 
     void memory() {
-        std::string address = "32'd0", data = "32'd0", read = "1'b0", write = "1'b0";
         for (const auto& e : ir_.effects) {
             if (e.op != "dm.read" && !e.op.starts_with("dm.write.")) continue;
             for (auto test : e.guard)
@@ -292,22 +303,14 @@ private:
             ValueId addressId;
             if (e.op == "dm.read") {
                 addressId = node(e.operands[0]).operands[0];
-                read += " || (" + condition + ')';
             } else {
                 if (e.op != "dm.write.4") throw Error(e.location, "P5 Verilog output supports only whole-word stores");
                 if (node(e.operands[0]).sources & Memory || node(e.operands[1]).sources & Memory)
                     throw Error(e.location, "memory write cannot depend on a memory result");
                 addressId = e.operands[0];
-                const auto value = get(e.operands[1], Stage::M);
-                data = "(" + condition + ") ? " + value + " : (" + data + ')';
-                write += " || (" + condition + ')';
+                code_.stores.push_back({condition, get(e.operands[1], Stage::M)});
             }
-            address = "(" + condition + ") ? " + get(addressId, Stage::M) + " : (" + address + ')';
-        }
-        if (read != "1'b0" || write != "1'b0") {
-            code_.memory = "                store = " + write + ";\n" +
-                "                addr = " + address + ";\n" +
-                "                data = " + data + ";\n";
+            code_.addresses.push_back({condition, get(addressId, Stage::M)});
         }
     }
 
@@ -371,49 +374,132 @@ private:
 
     const InstructionIR& ir_;
     std::string prefix_;
-    SharedLogic& shared_;
+    std::array<SharedLogic, 3>& shared_;
     InstructionCode code_;
     detail::Constants constants_;
     unsigned signal_ = 0;
     std::map<std::tuple<ValueId, Stage, unsigned, bool>, std::string> values_;
-    std::ostringstream declarations_;
-    std::ostringstream procedures_;
+    std::array<std::ostringstream, 3> declarations_, procedures_;
 };
 
-std::string decodeFlag(const InstructionCode& code, Stage stage) {
-    return (stage == Stage::D ? "" : std::string(stageName(stage)) + "_") + "ins_" + code.name;
-}
-
-template<class Body>
-void emitCase(std::ostream& out, const std::vector<InstructionCode>& instructions,
-              Stage stage, Body body) {
-    out << "        case (1'b1)\n";
-    for (std::size_t i = 0; i < instructions.size(); ++i) {
-        const auto& fragment = body(instructions[i]);
-        if (!fragment.empty())
-            out << "            " << decodeFlag(instructions[i], stage) << ": begin\n" << fragment << "            end\n";
+std::string reduceOr(const std::vector<std::string>& terms) {
+    if (terms.empty()) return "1'b0";
+    std::string expression = "|{";
+    for (std::size_t i = 0; i < terms.size(); ++i) {
+        if (i) expression += ", ";
+        expression += terms[i];
     }
-    out << "            default: begin end\n        endcase\n";
+    return expression + '}';
 }
 
-template<class Body>
-void emitComb(std::ostream& out, const std::vector<InstructionCode>& instructions,
-              Stage stage, std::string_view defaults, Body body) {
-    // Verilog doesn't schedule an always @* block with an empty sensitivity list.
-    const bool populated = std::any_of(instructions.begin(), instructions.end(),
-        [&](const InstructionCode& code) { return !body(code).empty(); });
-    out << "\n    always @(" << (populated ? "*" : stageTag(stage) + "_opcode") << ") begin\n"
-        << "        " << defaults << '\n';
-    if (populated) emitCase(out, instructions, stage, body);
-    out << "    end\n";
+std::string flag(const InstructionCode& code) { return "ins_" + code.name; }
+
+void emitDecode(std::ostream& out, const std::vector<InstructionCode>& instructions, std::size_t stage) {
+    out << "\n    // First matching definition wins, even if encodings overlap.\n";
+    std::string previous;
+    std::vector<std::string> decoded;
+    for (std::size_t i = 0; i < instructions.size(); ++i) {
+        const auto& code = instructions[i];
+        const auto matched = "match_" + code.name;
+        const auto selected = flag(code);
+        out << "    wire " << matched << ";\n"
+            << "    assign " << matched << " = " << code.match[stage] << ";\n"
+            << "    wire " << selected << ";\n"
+            << "    assign " << selected << " = valid && " << matched;
+        if (!previous.empty()) out << " && !" << previous;
+        out << ";\n";
+        decoded.push_back(selected);
+
+        if (i + 1 < instructions.size()) {
+            const auto prefix = "matched_through_" + code.name;
+            out << "    wire " << prefix << ";\n"
+                << "    assign " << prefix << " = ";
+            if (!previous.empty()) out << previous << " || ";
+            out << matched << ";\n";
+            previous = prefix;
+        }
+    }
+    out << "    wire decoded;\n    assign decoded = " << reduceOr(decoded) << ";\n";
 }
 
+class SignalEmitter {
+public:
+    SignalEmitter(std::ostream& out, const std::vector<InstructionCode>& instructions)
+        : out_(out), instructions_(instructions) {}
 
+    template<class Drives>
+    void emit(std::string_view signal, unsigned width, Drives drives, bool activeOnly = false) {
+        std::map<std::string, std::map<std::string, std::vector<std::string>>> groups;
+        for (const auto& code : instructions_) {
+            const auto& choices = drives(code);
+            for (const auto& drive : choices) {
+                auto& instructions = groups[activeOnly ? "" : drive.value][drive.guard];
+                const auto name = flag(code);
+                if (std::find(instructions.begin(), instructions.end(), name) == instructions.end())
+                    instructions.push_back(name);
+            }
+        }
+        const auto zero = std::to_string(width) + "'d0";
+        std::vector<std::string> terms;
+        for (const auto& [value, guards] : groups) {
+            std::vector<std::string> enables;
+            for (const auto& [guard, instructions] : guards)
+                enables.push_back(condition(guard, instructions));
+            if (activeOnly) {
+                terms = std::move(enables);
+            } else {
+                auto select = enables.size() == 1 ? enables.front() : reduceOr(enables);
+                terms.push_back("(" + select + " ? (" + value + ") : " + zero + ")");
+            }
+        }
+        out_ << "    assign " << signal << " = ";
+        if (activeOnly) {
+            out_ << reduceOr(terms);
+        } else if (terms.empty()) {
+            out_ << zero;
+        } else {
+            for (std::size_t i = 0; i < terms.size(); ++i) {
+                if (i) out_ << "\n               | ";
+                out_ << terms[i];
+            }
+        }
+        out_ << ";\n";
+    }
+
+private:
+    std::string condition(const std::string& guard, const std::vector<std::string>& instructions) {
+        if (guard == "1'b1" && instructions.size() == 1) return instructions.front();
+        const auto key = std::pair{guard, instructions};
+        if (auto it = enables_.find(key); it != enables_.end()) return it->second;
+
+        const auto base = "enable_" + instructions.front().substr(4);
+        const auto count = ++enableCounts_[base];
+        const auto name = base + "__" + std::to_string(count);
+        out_ << "    wire " << name << ";\n"
+             << "    assign " << name << " = " << reduceOr(instructions);
+        if (guard != "1'b1") out_ << " && (" << guard << ')';
+        out_ << ";\n";
+        enables_.emplace(key, name);
+        return name;
+    }
+
+    std::ostream& out_;
+    const std::vector<InstructionCode>& instructions_;
+    std::map<std::pair<std::string, std::vector<std::string>>, std::string> enables_;
+    std::map<std::string, unsigned> enableCounts_;
+};
 
 void emitPromise(std::ostream& out, const std::vector<InstructionCode>& instructions, Stage stage) {
     const auto n = PromiseNames(stage);
     const std::string input = stage == Stage::D ? "101'd0" : stage == Stage::E ? "ep" : "mp";
-    out << "    wire [`MDR_PW-1:0] " << n.state << " = " << input << ";\n"
+    const auto index = static_cast<unsigned>(stage);
+    std::map<std::string, std::vector<std::string>> actions;
+    for (const auto& code : instructions)
+        if (!code.promise[index].empty())
+            actions[code.promise[index]].push_back(flag(code));
+
+    out << "\n    // Update the Promise for the next pipeline boundary.\n"
+        << "    wire [`MDR_PW-1:0] " << n.state << " = " << input << ";\n"
         << "    reg [31:0] " << n.bitmap << ", " << n.data << ", " << n.pending << ", " << n.raw << ";\n"
         << "    reg " << n.started << ", " << n.yielded << ", " << n.ready << ";\n"
         << "    reg [1:0] " << n.lag << ";\n"
@@ -423,25 +509,22 @@ void emitPromise(std::ostream& out, const std::vector<InstructionCode>& instruct
         << "        " << n.started << " = " << n.state << "[`MDR_STARTED];\n"
         << "        " << n.yielded << " = " << n.state << "[`MDR_YIELDED];\n"
         << "        " << n.pending << " = 0; " << n.lag << " = 0;\n";
-    emitCase(out, instructions, stage, [stage](const InstructionCode& code) -> const std::string& {
-        return code.promise[static_cast<unsigned>(stage)];
-    });
+    for (const auto& [body, flags] : actions)
+        out << "        if (" << reduceOr(flags) << ") begin\n" << body << "        end\n";
     out << "        " << n.raw << " = (" << n.started << " ? " << n.bitmap << " : " << n.pending
         << ") & 32'hfffffffe;\n"
         << "        " << n.ready << " = " << n.lag << " == 0 && " << n.yielded
         << " && " << n.raw << " != 0 && (" << n.bitmap << " & (" << n.bitmap << " - 32'd1)) == 0;\n"
-        << "        out_" << n.tag << " = " << n.tag << "_opcode == 0 ? 0 : {" << n.ready
+        << "        promise_out = decoded ? {" << n.ready
         << ", " << n.yielded << ", " << n.started << ", " << n.lag
-        << ", " << n.raw << ", " << n.bitmap << ", " << n.data << "};\n"
+        << ", " << n.raw << ", " << n.bitmap << ", " << n.data << "} : 0;\n"
         << "    end\n";
 }
 
-std::string operandNetwork(unsigned ports) {
-    std::ostringstream out;
-    out << "    localparam PORTS = " << ports << ";\n";
-    out << R"RTL(
-    // Each shared RF slot carries its address, forwarded value, and M-use bit.
-    wire [PORTS*38-1:0] d_rf_values, e_rf_values, m_rf_values;
+void emitOperands(std::ostream& out, unsigned ports, Stage stage) {
+    out << "    localparam PORTS = " << ports << ";\n" << R"RTL(
+    // Each shared RF slot contains a register number, value, and M-use bit.
+    wire [PORTS*38-1:0] rf_values;
 
     function [31:0] rf_lookup;
         input [4:0] number;
@@ -466,69 +549,103 @@ std::string operandNetwork(unsigned ports) {
         end
     endfunction
 
-    reg [31:0] req_d, req_e, req_m;
-
-    function hazard;
-        input [4:0] number;
-        input [1:0] tuse;
-        input [`MDR_PW-1:0] e, m, w;
-        begin
-            if (e[64+number]) hazard = e[`MDR_LAG] > tuse;
-            else if (m[64+number]) hazard = m[`MDR_LAG] > tuse;
-            else if (w[64+number]) hazard = w[`MDR_LAG] > tuse;
-            else hazard = 1'b0;
-        end
-    endfunction
-
-    reg rf_stall;
-    integer r, port, k;
+)RTL";
+    if (stage == Stage::D) {
+        out << R"RTL(    integer r, port;
     always @* begin
         read_addr = 0;
-        rf_stall = 0;
         port = 0;
-        for (r = 1; r < 32; r = r + 1) begin
+        for (r = 1; r < 32; r = r + 1)
             if (req_d[r] || req_e[r] || req_m[r]) begin
                 if (port < PORTS) read_addr[5*port +: 5] = r[4:0];
                 port = port + 1;
-                rf_stall = rf_stall | hazard(r[4:0], req_d[r] ? 2'd0 : req_e[r] ? 2'd1 : 2'd2, ep, mp, wp);
             end
-        end
     end
 
-    assign stall = rf_stall;
-
-    always @* begin
-        write_addr = 5'd0;
-        for (k = 31; k > 0; k = k - 1)
-            if (wp[32+k]) write_addr = k[4:0];
-    end
-
-
-    genvar p;
-    generate
-        for (p = 0; p < PORTS; p = p + 1) begin: rf_forward
-            wire [4:0] da = read_addr[5*p +: 5];
-            wire [4:0] ea = e_rf[38*p +: 5];
-            wire [4:0] ma = m_rf[38*p +: 5];
-            wire [31:0] dv = offer(da, offer(da, offer(da, read_data[32*p +: 32], wp), mp), ep);
-            wire [31:0] ev = offer(ea, offer(ea, e_rf[38*p+5 +: 32], wp), mp);
-            wire [31:0] mv = offer(ma, m_rf[38*p+5 +: 32], wp);
-            assign d_rf_values[38*p +: 38] = {req_m[da], dv, da};
-            assign e_rf_values[38*p +: 38] = {e_rf[38*p+37], ev, ea};
-            assign m_rf_values[38*p +: 38] = {1'b0, mv, ma};
-            assign d_rf_next[38*p +: 38] = (req_e[da] || req_m[da]) ? d_rf_values[38*p +: 38] : 38'd0;
-            assign e_rf_next[38*p +: 38] = e_rf[38*p+37] ? e_rf_values[38*p +: 38] : 38'd0;
-        end
-    endgenerate
 )RTL";
-    return out.str();
+    }
+    out << "    genvar p;\n    generate\n        for (p = 0; p < PORTS; p = p + 1) begin: rf_forward\n";
+    switch (stage) {
+    case Stage::D:
+        out << R"RTL(            wire [4:0] number = read_addr[5*p +: 5];
+            wire [31:0] value = offer(number, offer(number, offer(number, read_data[32*p +: 32], wp), mp), ep);
+            assign rf_values[38*p +: 38] = {req_m[number], value, number};
+            assign d_rf_next[38*p +: 38] = (req_e[number] || req_m[number]) ? rf_values[38*p +: 38] : 38'd0;
+)RTL";
+        break;
+    case Stage::E:
+        out << R"RTL(            wire [4:0] number = e_rf[38*p +: 5];
+            wire [31:0] value = offer(number, offer(number, e_rf[38*p+5 +: 32], wp), mp);
+            assign rf_values[38*p +: 38] = {e_rf[38*p+37], value, number};
+            assign e_rf_next[38*p +: 38] = e_rf[38*p+37] ? rf_values[38*p +: 38] : 38'd0;
+)RTL";
+        break;
+    case Stage::M:
+        out << R"RTL(            wire [4:0] number = m_rf[38*p +: 5];
+            wire [31:0] value = offer(number, m_rf[38*p+5 +: 32], wp);
+            assign rf_values[38*p +: 38] = {1'b0, value, number};
+)RTL";
+        break;
+    default: break;
+    }
+    out << "        end\n    endgenerate\n";
 }
 
+std::string packedPayload(const InstructionCode& code, std::size_t bank, unsigned width) {
+    const auto& values = code.payload[bank];
+    if (values.empty()) return "";
+    std::vector<std::string> fields(values.rbegin(), values.rend());
+    if (const auto pad = width - code.payloadBits[bank]; pad != 0)
+        fields.insert(fields.begin(), std::to_string(pad) + "'d0");
+    if (fields.size() == 1) return fields.front();
+    std::string value = "{";
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (i) value += ", ";
+        value += fields[i];
+    }
+    return value + '}';
+}
+
+void emitPorts(std::ostream& out, Stage stage, const PipelineLayout& layout) {
+    const auto ports = layout.rfPorts;
+    const auto rfBits = ports * 38;
+    const char* name = stage == Stage::D ? "DCtrl" : stage == Stage::E ? "ECtrl" : "MCtrl";
+    out << "`include \"Promise.vh\"\n\nmodule " << name << "(\n"
+        << "    input valid,\n    input [31:0] IR, PC,\n";
+    switch (stage) {
+    case Stage::D:
+        out << "    input [`MDR_PW-1:0] ep, mp, wp,\n"
+            << "    input [" << ports * 32 - 1 << ":0] read_data,\n"
+            << "    output reg [" << ports * 5 - 1 << ":0] read_addr,\n"
+            << "    output [" << rfBits - 1 << ":0] d_rf_next,\n"
+            << "    output [" << layout.deBits - 1 << ":0] next_de_payload,\n"
+            << "    output [31:0] req_d, req_e, req_m, dest,\n"
+            << "    output do_jump, do_annul,\n";
+        break;
+    case Stage::E:
+        out << "    input [`MDR_PW-1:0] ep, mp, wp,\n"
+            << "    input [" << rfBits - 1 << ":0] e_rf,\n"
+            << "    input [" << layout.deBits - 1 << ":0] de_payload,\n"
+            << "    output [" << rfBits - 1 << ":0] e_rf_next,\n"
+            << "    output [" << layout.emBits - 1 << ":0] next_em_payload,\n";
+        break;
+    case Stage::M:
+        out << "    input [`MDR_PW-1:0] mp, wp,\n"
+            << "    input [31:0] word,\n"
+            << "    input [" << rfBits - 1 << ":0] m_rf,\n"
+            << "    input [" << layout.emBits - 1 << ":0] em_payload,\n"
+            << "    output [31:0] addr, data,\n"
+            << "    output store,\n";
+        break;
+    default: break;
+    }
+    out << "    output reg [`MDR_PW-1:0] promise_out\n);\n";
+}
 
 } // namespace
 
-std::string controller(const ModuleIR& module, PipelineLayout& layout) {
-    SharedLogic shared;
+std::array<std::string, 3> controllers(const ModuleIR& module, PipelineLayout& layout) {
+    std::array<SharedLogic, 3> shared;
     std::vector<InstructionCode> instructions;
     for (const auto& instruction : module.instructions) {
         instructions.push_back(InstructionEmitter(instruction, shared).run());
@@ -536,61 +653,48 @@ std::string controller(const ModuleIR& module, PipelineLayout& layout) {
         layout.emBits = std::max(layout.emBits, instructions.back().payloadBits[1]);
     }
 
-    std::ostringstream out;
-    out << "`include \"Promise.vh\"\n\nmodule Controller(\n"
-        << "    input d_valid,\n"
-        << "    input [" << layout.opBits - 1 << ":0] e_opcode, m_opcode,\n"
-        << "    output reg [" << layout.opBits - 1 << ":0] d_opcode,\n"
-        << "    input [31:0] d_ins, e_ins, m_ins, d_pc, e_pc, m_pc, word,\n"
-        << "    input [`MDR_PW-1:0] ep, mp, wp,\n"
-        << "    output reg [" << layout.rfPorts * 5 - 1 << ":0] read_addr,\n"
-        << "    input [" << layout.rfPorts * 32 - 1 << ":0] read_data,\n"
-        << "    input [" << layout.rfPorts * 38 - 1 << ":0] e_rf, m_rf,\n"
-        << "    output [" << layout.rfPorts * 38 - 1 << ":0] d_rf_next, e_rf_next,\n"
-        << "    input [" << layout.deBits - 1 << ":0] de_payload,\n"
-        << "    input [" << layout.emBits - 1 << ":0] em_payload,\n"
-        << "    output reg [" << layout.deBits - 1 << ":0] next_de_payload,\n"
-        << "    output reg [" << layout.emBits - 1 << ":0] next_em_payload,\n"
-        << "    output reg [`MDR_PW-1:0] out_d, out_e, out_m,\n"
-        << "    output reg do_jump, do_annul, store,\n"
-        << "    output stall,\n    output reg [4:0] write_addr,\n"
-        << "    output reg [31:0] dest, addr, data\n);\n";
-
-    out << operandNetwork(layout.rfPorts);
-    for (const auto& instruction : instructions) out << instruction.localDeclarations;
-    out << shared.str();
-    for (const auto& instruction : instructions) out << instruction.procedures;
-
-    out << "\n    // Decode once in D and carry the selected operation through E and M.\n"
-        << "    always @* begin\n        if (!d_valid) d_opcode = 0;\n";
-    for (std::size_t i = 0; i < instructions.size(); ++i)
-        out << "        else if (" << instructions[i].match << ") d_opcode = " << i + 1 << ";\n";
-    out << "        else d_opcode = 0;\n    end\n";
-    for (std::size_t i = 0; i < instructions.size(); ++i) {
-        const auto& instruction = instructions[i];
-        for (auto stage : {Stage::D, Stage::E, Stage::M}) {
-            out << "    wire " << decodeFlag(instruction, stage) << " = "
-                << stageTag(stage) << "_opcode == " << i + 1 << ";\n";
+    const std::array widths{layout.deBits, layout.emBits};
+    for (auto& instruction : instructions)
+        for (std::size_t bank = 0; bank < widths.size(); ++bank) {
+            auto payload = packedPayload(instruction, bank, widths[bank]);
+            if (!payload.empty()) instruction.payloadDrivers[bank].push_back({"1'b1", std::move(payload)});
         }
+
+    std::array<std::string, 3> files;
+    for (const auto stage : {Stage::D, Stage::E, Stage::M}) {
+        const auto index = static_cast<unsigned>(stage);
+        std::ostringstream out;
+        emitPorts(out, stage, layout);
+        emitOperands(out, layout.rfPorts, stage);
+        for (const auto& instruction : instructions) out << instruction.localDeclarations[index];
+        out << shared[index].str();
+        for (const auto& instruction : instructions) out << instruction.procedures[index];
+        emitDecode(out, instructions, index);
+
+        SignalEmitter signals(out, instructions);
+        if (stage == Stage::D) {
+            for (auto use : {Stage::D, Stage::E, Stage::M})
+                signals.emit("req_" + stageTag(use), 32, [use](const InstructionCode& code) -> const auto& {
+                    return code.requests[static_cast<unsigned>(use)];
+                });
+            signals.emit("do_jump", 1, [](const InstructionCode& code) -> const auto& { return code.jumps; }, true);
+            signals.emit("do_annul", 1, [](const InstructionCode& code) -> const auto& { return code.annuls; }, true);
+            signals.emit("dest", 32, [](const InstructionCode& code) -> const auto& { return code.jumps; });
+        } else if (stage == Stage::M) {
+            signals.emit("addr", 32, [](const InstructionCode& code) -> const auto& { return code.addresses; });
+            signals.emit("data", 32, [](const InstructionCode& code) -> const auto& { return code.stores; });
+            signals.emit("store", 1, [](const InstructionCode& code) -> const auto& { return code.stores; }, true);
+        }
+        if (stage != Stage::M) {
+            const auto size = stage == Stage::D ? layout.deBits : layout.emBits;
+            signals.emit(stage == Stage::D ? "next_de_payload" : "next_em_payload", size,
+                [index](const InstructionCode& code) -> const auto& { return code.payloadDrivers[index]; });
+        }
+        emitPromise(out, instructions, stage);
+        out << "endmodule\n";
+        files[index] = out.str();
     }
-    emitComb(out, instructions, Stage::D, "req_d = 0; req_e = 0; req_m = 0;",
-        [](const auto& code) -> const std::string& { return code.requests; });
-    emitComb(out, instructions, Stage::D, "do_jump = 0; do_annul = 0; dest = 0;",
-        [](const auto& code) -> const std::string& { return code.control; });
-    emitComb(out, instructions, Stage::M, "addr = 0; data = 0; store = 0;",
-        [](const auto& code) -> const std::string& { return code.memory; });
-
-    for (auto stage : {Stage::D, Stage::E, Stage::M}) emitPromise(out, instructions, stage);
-
-    for (std::size_t bank = 0; bank < 2; ++bank) {
-        const auto stage = bank == 0 ? Stage::D : Stage::E;
-        const std::string name = bank == 0 ? "de_payload" : "em_payload";
-        emitComb(out, instructions, stage, "next_" + name + " = 0;",
-            [bank](const auto& code) -> const std::string& { return code.payload[bank]; });
-    }
-
-    out << "endmodule\n";
-    return out.str();
+    return files;
 }
 
 } // namespace mdr::rtl

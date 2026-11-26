@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(mdrframe VERSION 0.1.0 LANGUAGES CXX)
+project(midoriframe VERSION 0.1.0 LANGUAGES CXX)
 
 add_executable(mdrframe
     src/main.cpp
@@ -12,7 +12,7 @@ add_executable(mdrframe
     src/verilog_top.cpp
 )
 set(rtl_resources "")
-foreach(file IN ITEMS IM.v DM.v RF.v FDreg.v DEreg.v EMreg.v MWreg.v Promise.vh mips_tb.v)
+foreach(file IN ITEMS IM.v DM.v RF.v STALL.v FDreg.v DEreg.v EMreg.v MWreg.v Promise.vh mips_tb.v)
     set(path "${CMAKE_CURRENT_SOURCE_DIR}/rtl/${file}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
     file(READ "${path}" bytes HEX)

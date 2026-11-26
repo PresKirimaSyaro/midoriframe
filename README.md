@@ -1,66 +1,88 @@
-# mdrframe
+# midoriframe
 
-`mdrframe` 是五级顺序流水线指令 DSL 的 C++20 编译器。它读取单个 `.mdr` 指令集，可输出带阶段的中间表示、依赖表或 P5 Verilog 工程。
+midoriframe 把一份描述 MIPS 指令的 `.mdr` 文件编译成 BUAA CO P5 风格的五级流水线 Verilog 工程。用 DSL 写出每条指令的计算、访存、跳转和写回，编译器按 P5 的流水级生成控制器和流水寄存器，阻塞由独立的 `STALL` 模块判断。命令行工具名为 `mdrframe`。
 
-## 构建与运行
+## 快速开始
 
-需要 CMake 3.20 或更新版本，以及支持 C++20 的编译器。在当前 Windows 环境可用 MinGW。
+需要 CMake 3.20+ 和 C++20 编译器。
 
-```powershell
-cmake -S . -B build -G "MinGW Makefiles"
+```sh
+cmake -S . -B build
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-.\build\mdrframe.exe examples\p5.mdr
-.\build\mdrframe.exe --emit=deps examples\conditional.mdr
-.\build\mdrframe.exe --emit=ir examples\lrm.mdr -o build\lrm.mdrir
 ```
 
-在其他环境可以省略 `-G` 或选择本机 CMake 生成器。默认在当前目录生成 `<输入文件名>.rtl/`，例如 `p5.rtl/`。`--emit=ir` 输出完整 IR，`--emit=deps` 输出依赖表，默认写到标准输出。若输入名没有扩展名且路径不存在，程序尝试附加 `.mdr`。显式提供路径时也可以读取先前的 `.dsl` 样例。
+在 Windows 的 MinGW 环境可用 `cmake -S . -B build -G "MinGW Makefiles"`，可执行文件为 `build/mdrframe.exe`。多配置生成器把可执行文件放在相应的配置目录下。
 
-P5 默认使用二参数整字写 `dm_write(addr, val)`，整字访存忽略地址低两位。若要分析早期 P6 样例中的字节或半字写，显式加 `--p6-narrow-writes`。
+从仓库根目录生成并运行示例。下面使用单配置构建的可执行文件路径，Windows 下可用 `.\build\mdrframe.exe` 执行第一条命令。
 
-## 生成和仿真 P5 工程
+仿真可以使用 Icarus Verilog 提供的 `iverilog` 与 `vvp`。
 
-```powershell
-.\build\mdrframe.exe -o build\p5 --program tests\p5_smoke.hex examples\p5.mdr
-Push-Location build\p5
-iverilog -g2005 -s mips_tb -o sim.vvp -f files.f
+```sh
+./build/mdrframe -o build/p5 --program tests/p5_smoke.hex examples/p5.mdr
+cd build/p5
+iverilog -g2005 -s mips_tb -o sim.vvp -f files.f # 或者直接使用 iverilog -o sim *.v *.vh
 vvp sim.vvp
-Pop-Location
 ```
 
-`-o` 指定工程目录。`mips.v` 连接取指、`FDreg`、`DEreg`、`EMreg`、`MWreg` 与 `Controller`。`Controller.v` 在 D 从 IR 译码，生成 `ins_add`、`ins_sub` 等单比特控制标志，再用各流水级的指令标志选择计算与副作用。`rs`、`rt`、`rd` 等编码字段、RF 读口、转发及阻塞逻辑均由同一数据通路共用。跨级计算结果按使用级分配寄存器，D→E 和 E→M 各自按指令中所需的最大宽度复用存储。工程还包含 IM、DM、RF、Promise 定义、原 P5 的 `mips_tb.v` 和仿真文件清单。
+默认在当前目录生成 `<输入文件名>.rtl/`，也可用 `-o` 指定目录。`--program` 把机器码镜像复制为 `code.txt`。省略时沿用输出目录已有的镜像，新目录则填充零指令。从生成目录运行仿真，IM 在那里读取 `code.txt`，testbench 在那里写入 `wave.vcd`。
 
-IM 有 4096 个 32 位字，起始地址为 `0x3000`。`--program` 将十六进制程序镜像复制为 `code.txt`。省略该选项时保留已有的 `code.txt`，首次生成则填充零指令。在生成目录运行仿真时，IM 从该目录读取 `code.txt`，testbench 在同一目录保存 `wave.vcd`。
+## 语法速览
 
-DM 有 3072 个 32 位字，复位清零，支持整字写及整字、半字、字节读。`--p6-narrow-writes` 可用于 IR 和依赖分析，P5 Verilog 后端会拒绝窄写。跳转与清槽只在 D 级执行，DM 只在 M 级读写。寄存器写回和整字存储沿用 P5 日志格式。CMake 找到 `iverilog` 和 `vvp` 时，CTest 同时运行原 testbench 下的基础流水线和动态 Promise 回归。
+这条 `lw` 在 D 公布写回目标，在 E 计算地址，在 M 读取数据。编译器会自动解析出 `GPR[base]` 的使用时间、写入 `GPR[rt]` 的值的产生时间，并自动生成阻塞、转发逻辑。
 
-### 与手写 P5 逐拍对照
+```mdr
+lw {
+    match(ins[31:26] == 6'h23);
+    base: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    off: 16 = ins[15:0];
 
-```powershell
-python tests/compare_p5.py --mdrframe build/mdrframe.exe --p5 D:/Dcode/co/p5
+    D {
+        update 32'd1 << rt;
+    }
+
+    addr: 32;
+    E {
+        addr = grf_read(base) + {{16{off[15]}}, off};
+    }
+    M {
+        yield dm_read(addr, 4);
+    }
+}
 ```
 
-脚本给两个实现加载同一份指令镜像，复位后逐拍比较取指 PC、D 级指令和 `stall`，并比较同拍的寄存器与内存写入。脚本使用独立监视 testbench，原工程的文件直接复制到测试目录。日志保存于 `build/p5-diff/`。
+| 写法 | 含义 |
+|---|---|
+| `match(条件表达式);` | 每条指令恰有一个，表示指令码 `ins` 被解释成当前指令的条件 |
+| `name: 位宽;` 或 `name: 位宽 = 表达式;` | 声明定宽变量。外层声明可放在流水级之间，对后续流水级可见 |
+| `D {...}`、`E {...}`、`M {...}` | 表明每一流水级的处理逻辑，不用的级可以省略 |
+| `if / else`、`for` | 主体可写一条语句或大括号块。`for` 在编译期展开，支持倒序和跳步 |
+| `grf_read(r)` | `GPR[r]` 寄存器的值 |
+| `dm_read(addr, size)` | 必须位于 M 级。读取 DM 在 `addr[31:2]` 地址处 `size` 个字节。目前 p5 只支持 `size = 4` 整字读取 |
+| `dm_write(addr, val)` | 必须位于 M 级。向 DM 的 addr[31:2] 位置写入32 位 val |
+| `jump(addr)` | 必须位于 D 级。进行跳转，在延迟槽后跳转到 `addr` |
+| `annul_delay_slot()` | 必须位于 D 级。清空延迟槽 |
+| `update bitmap` | 指定可能的 GPR 写入目标。首次更新设定目标集合，后续取交集 |
+| `yield value` | 产生写入 GPR 目标的值 |
 
-## 控制流语法
+完整语法、控制时序和练习题的 RTL 对照见 [SPEC.md](SPEC.md)。
 
-`if`、`else` 和 `for` 的主体可以写成一条语句，也可以用大括号包含多条语句。单条语句仍有自己的作用域。嵌套 `if` 中，`else` 与最近的尚未匹配的 `if` 绑定。D、E、M 流水级必须使用大括号。
+## 检查生成结果
 
-静态 `for` 支持 `<`、`<=`、`>`、`>=` 比较，以及 `i = i + step`、`i = i - step` 两种更新。起点、限值和正步长须在编译时确定。例如 `for (i = 31; i >= 0; i = i - 1)` 从 31 到 0 展开，`for (i = 7; i >= 0; i = i - 2)` 只访问 7、5、3、1。
+| 命令选项 | 输出 |
+|---|---|
+| `--emit=verilog` | 默认模式，生成 P5 风格的 Verilog 工程和 `files.f` |
+| `--emit=ir` | 带位宽、流水级和执行条件的中间表示 |
+| `--emit=deps` | GPR 使用级、跨级传递和 Promise 路径等依赖信息 |
 
-指令外层声明可以写在流水级之前或流水级之间。声明对后续流水级可见，例如在 D 和 E 之间声明的 `addr` 可在 E 中赋值，再由 M 读取。
+- [P5 基础指令集](examples/p5.mdr)包含可直接生成工程的 16 条指令。
+- [动态目的寄存器](examples/lrm.mdr)展示如何根据内存读数收缩写回目标。
+- [条件就绪时序](examples/conditional.mdr)展示一条指令可在不同流水边界转发。
 
-## 输出约定
+CMake 找到 Icarus Verilog 时，CTest 会运行生成工程的仿真测试。也可以把本地手写 P5 工程交给对拍脚本。它比较每拍的取指 PC、D 级指令、阻塞信号，以及寄存器和内存写入。
 
-- `priority` 按源文件顺序编号，首个命中者生效。译码未命中时无副作用。
-- `values` 是带宽度、符号、计算级和操作数的表达式图。`fit` 标记 Verilog 表达式的赋值位宽上下文，保留源运算符和定宽边界。算术节点上的宽度是它自身的推导宽度，后端仍需按使用处的 Verilog 上下文延展计算。静态循环已展开，`phi` 合并分支值，`insert` 更新位或切片。一个 IR 值编号只定义一次。
-- `effects` 给出带执行条件的有序动作，包括访存、跳转、清槽和 Promise 更新。`%N` 引用值，`#N` 引用动作。内存及 GPR 写回的数据和目的可由不同阶段产生。
-- `register_reads` 给出 D 级可计算的读号、读使能和实际使用级。D/E/M 的 `Tuse` 分别为 0/1/2。只依赖编码或 PC 的条件可用于 D 级读口选择，依赖 GPR 或 DM 的条件保守处理。读口上界按整份指令集推导，可合并等价的读号，`$0` 可直接取零。
-- `pipeline_carries` 列出 D→E、E→M 之间需要传递的值。普通值已完成计算。标为 `rf-address+candidate` 的操作数还要随级接受旁路更新。IR 中的 `ins` 和 `pc` 由后端作为每条流水指令的公共信息提供。
-- `promise` 给出初始 RAW 候选上界及各路径的 `update`、`yield` 和保证就绪的边界。首次 `update` 赋值，后续取交集。零 bitmap 无写回。路径未定时取剩余可能路径中最迟的可用边界，已确定时按该路径判断。未枚举的复杂情况仍有有序受保护动作可供后端分析。`ready_by` 按有效的单目标写回程序计算；最终多位的行为依照 DSL 规范未定义。
-
-`examples/p5.mdr` 包含 16 条 P5 基础指令。`examples/lrm.mdr` 由内存数据决定写回哪一个 GPR。`examples/conditional.mdr` 展示同一条指令在 E→M 或 M→W 就绪的两条路径。
-
-编译期求值支持最多 64 位的常量计算，较宽的定宽表达式保留在 IR 中。依赖分析使用保守上界处理它无法证明的条件和 bitmap。`mdrframe` 对当前能确认的作用域、使用阶段、静态循环和资源使用错误提供带位置的诊断。它没有通用的路径可满足性求解器。
+```sh
+python tests/compare_p5.py --mdrframe build/mdrframe --p5 /path/to/handwritten-p5
+```
 

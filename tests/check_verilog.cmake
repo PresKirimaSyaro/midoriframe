@@ -9,7 +9,7 @@ if(DYNAMIC)
 bit_write {
     match(ins[31:26] == 6'h3f);
     E {
-        result: 32 = grf_read(5'd1);
+        result: 32 = grf_read(ins[25-:5]) + grf_read(ins[21+:5]);
         result[0] = 1'b1;
         update 32'd1 << 5'd2;
         yield result;
@@ -40,10 +40,26 @@ foreach(stage IN ITEMS FDreg DEreg EMreg MWreg)
         message(FATAL_ERROR "A dedicated ${stage} instance is required")
     endif()
 endforeach()
-file(READ "${OUT}/Controller.v" control)
-if(NOT top MATCHES "Controller Controller\\(" OR NOT control MATCHES "wire ins_add"
-        OR NOT control MATCHES "case \\(1'b1\\)" OR control MATCHES "always @\\(posedge")
-    message(FATAL_ERROR "Expected shared combinational Controller and named decode flags")
+foreach(stage IN ITEMS DCtrl ECtrl MCtrl)
+    file(READ "${OUT}/${stage}.v" control)
+    if(NOT top MATCHES "${stage} ${stage}\\(" OR NOT control MATCHES "input \\[31:0\\] IR, PC"
+            OR NOT control MATCHES "assign ins_add = valid" OR control MATCHES "_opcode|always @\\(posedge")
+        message(FATAL_ERROR "Expected a separate combinational controller for ${stage}")
+    endif()
+endforeach()
+file(READ "${OUT}/DCtrl.v" decode)
+string(REGEX MATCHALL "IR\\[25:21\\]" rs_slices "${decode}")
+list(LENGTH rs_slices rs_count)
+if(NOT rs_count EQUAL 1 OR NOT decode MATCHES "\\|\\{ins_add, ins_sub")
+    message(FATAL_ERROR "Expected shared rs extraction and grouped instruction enables")
+endif()
+file(READ "${OUT}/MCtrl.v" memory)
+if(NOT memory MATCHES "assign store = \\|\\{ins_sw\\}")
+    message(FATAL_ERROR "Expected the store enable to come from ins_sw")
+endif()
+file(READ "${OUT}/STALL.v" hazard)
+if(NOT top MATCHES "STALL STALL\\(" OR NOT hazard MATCHES "assign stall =" OR decode MATCHES "assign stall")
+    message(FATAL_ERROR "Expected a separate STALL module")
 endif()
 
 file(REMOVE "${OUT}/generated-test.vvp" "${OUT}/wave.vcd")
