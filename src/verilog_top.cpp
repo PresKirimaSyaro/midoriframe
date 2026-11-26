@@ -4,155 +4,72 @@
 
 namespace mdr::rtl {
 
-std::string top(unsigned instructionCount, unsigned ports) {
+std::string top(const PipelineLayout& layout) {
     std::ostringstream out;
     out << "`include \"Promise.vh\"\n\n"
         << "module mips(input clk, reset);\n"
-        << "    localparam N = " << instructionCount << ", PORTS = " << ports << ";\n";
-    out << R"RTL(    reg [31:0] pc, D_IR, D_PC, E_IR, E_PC, M_IR, M_PC, W_PC;
-    reg D_valid;
-    wire [31:0] ins;
-    wire [N-1:0] matches, D_select;
-    reg [N-1:0] E_select, M_select;
-    reg [`MDR_PW-1:0] E_promise, M_promise, W_promise;
-
-    wire [`MDR_PW-1:0] d_result [0:N-1];
-    wire [`MDR_PW-1:0] e_result [0:N-1];
-    wire [`MDR_PW-1:0] m_result [0:N-1];
-    wire [31:0] request_d [0:N-1], request_e [0:N-1], request_m [0:N-1];
-    wire [31:0] jump_addr [0:N-1], mem_addr [0:N-1], mem_data [0:N-1];
-    wire [N-1:0] jump_en, annul_en, mem_we;
-
-    reg [`MDR_PW-1:0] next_E, next_M, next_W;
-    reg [31:0] use_D, use_E, use_M;
-    reg [31:0] npc, DM_addr, DM_WD;
-    wire [31:0] DM_RD;
-    reg [PORTS*5-1:0] read_addr;
+        << "    localparam OP_BITS = " << layout.opBits << ", PORTS = " << layout.rfPorts
+        << ", DE_BITS = " << layout.deBits << ", EM_BITS = " << layout.emBits << ";\n";
+    out << R"RTL(    localparam RF_BITS = PORTS * 38;
+    reg [31:0] pc;
+    wire [31:0] ins, D_IR, D_PC, E_IR, E_PC, M_IR, M_PC, W_PC;
+    wire D_valid;
+    wire [OP_BITS-1:0] D_opcode, E_opcode, M_opcode;
+    wire [`MDR_PW-1:0] D_promise, E_promise, M_promise, W_promise, next_M, next_W;
+    wire [DE_BITS-1:0] D_payload, E_payload;
+    wire [EM_BITS-1:0] E_next_payload, M_payload;
+    wire [RF_BITS-1:0] D_operands, E_operands, E_next_operands, M_operands;
+    wire [31:0] jump_addr, DM_addr, DM_WD, DM_RD;
+    wire jump_en, annul_en, mem_we, stall;
+    wire [31:0] npc = jump_en ? jump_addr : annul_en ? D_PC + 32'd8 : pc + 32'd4;
+    wire [PORTS*5-1:0] read_addr;
     wire [PORTS*32-1:0] read_data;
-    reg stall;
-    reg [4:0] write_addr;
-    integer lane, r, port, k;
+    wire [4:0] write_addr;
+
+    FDreg FDreg(.clk(clk), .reset(reset), .stall(stall), .annul(annul_en),
+                .F_IR(ins), .F_PC(pc), .D_valid(D_valid), .D_IR(D_IR), .D_PC(D_PC));
+    DEreg #(.OP_BITS(OP_BITS), .PAYLOAD_BITS(DE_BITS), .RF_BITS(RF_BITS)) DEreg(
+                .clk(clk), .reset(reset), .stall(stall),
+                .D_IR(D_IR), .D_PC(D_PC), .D_opcode(D_opcode), .D_promise(D_promise),
+                .D_payload(D_payload), .D_operands(D_operands),
+                .E_IR(E_IR), .E_PC(E_PC), .E_opcode(E_opcode), .E_promise(E_promise),
+                .E_payload(E_payload), .E_operands(E_operands));
+    EMreg #(.OP_BITS(OP_BITS), .PAYLOAD_BITS(EM_BITS), .RF_BITS(RF_BITS)) EMreg(
+                .clk(clk), .reset(reset),
+                .E_IR(E_IR), .E_PC(E_PC), .E_opcode(E_opcode), .E_promise(next_M),
+                .E_payload(E_next_payload), .E_operands(E_next_operands),
+                .M_IR(M_IR), .M_PC(M_PC), .M_opcode(M_opcode), .M_promise(M_promise),
+                .M_payload(M_payload), .M_operands(M_operands));
+    MWreg MWreg(.clk(clk), .reset(reset), .M_PC(M_PC), .M_promise(next_W),
+                .W_PC(W_PC), .W_promise(W_promise));
+
+    Controller Controller(.d_valid(D_valid),
+                .d_opcode(D_opcode), .e_opcode(E_opcode), .m_opcode(M_opcode),
+                .d_ins(D_IR), .e_ins(E_IR), .m_ins(M_IR),
+                .d_pc(D_PC), .e_pc(E_PC), .m_pc(M_PC), .word(DM_RD),
+                .ep(E_promise), .mp(M_promise), .wp(W_promise),
+                .read_addr(read_addr), .read_data(read_data),
+                .e_rf(E_operands), .m_rf(M_operands), .d_rf_next(D_operands), .e_rf_next(E_next_operands),
+                .de_payload(E_payload), .em_payload(M_payload),
+                .next_de_payload(D_payload), .next_em_payload(E_next_payload),
+                .stall(stall), .write_addr(write_addr),
+                .out_d(D_promise), .out_e(next_M), .out_m(next_W),
+                .do_jump(jump_en), .do_annul(annul_en), .dest(jump_addr),
+                .addr(DM_addr), .data(DM_WD), .store(mem_we));
 
     IM instruction_memory(.pc(pc), .instr(ins));
-    DM data_memory(.clk(clk), .reset(reset), .we(|mem_we), .addr(DM_addr),
+    DM data_memory(.clk(clk), .reset(reset), .we(mem_we), .addr(DM_addr),
                    .wd(DM_WD), .this_PC(M_PC), .rd(DM_RD));
     RF #(.PORTS(PORTS)) registers(.clk(clk), .reset(reset), .we(W_promise[`MDR_READY]),
                    .read_addr(read_addr), .read_data(read_data), .wa(write_addr),
                    .wd(W_promise[`MDR_DATA]), .this_PC(W_PC));
 
-    always @* begin
-        write_addr = 5'd0;
-        for (k = 31; k > 0; k = k - 1)
-            if (W_promise[32+k]) write_addr = k[4:0];
-    end
-
-    always @* begin
-        next_E = 0;
-        next_M = 0;
-        next_W = 0;
-        use_D = 0;
-        use_E = 0;
-        use_M = 0;
-        npc = |annul_en ? D_PC + 32'd8 : pc + 32'd4;
-        DM_addr = 0;
-        DM_WD = 0;
-        for (lane = 0; lane < N; lane = lane + 1) begin
-            next_E = next_E | d_result[lane];
-            next_M = next_M | e_result[lane];
-            next_W = next_W | m_result[lane];
-            use_D = use_D | request_d[lane];
-            use_E = use_E | request_e[lane];
-            use_M = use_M | request_m[lane];
-            if (jump_en[lane]) npc = jump_addr[lane];
-            DM_addr = DM_addr | mem_addr[lane];
-            DM_WD = DM_WD | mem_data[lane];
-        end
-    end
-
-    function hazard;
-        input [4:0] number;
-        input [1:0] tuse;
-        input [`MDR_PW-1:0] e, m, w;
-        begin
-            if (e[64+number]) hazard = e[`MDR_LAG] > tuse;
-            else if (m[64+number]) hazard = m[`MDR_LAG] > tuse;
-            else if (w[64+number]) hazard = w[`MDR_LAG] > tuse;
-            else hazard = 1'b0;
-        end
-    endfunction
-
-    always @* begin
-        read_addr = 0;
-        stall = 0;
-        port = 0;
-        for (r = 1; r < 32; r = r + 1) begin
-            if (use_D[r] || use_E[r] || use_M[r]) begin
-                if (port < PORTS) read_addr[5*port +: 5] = r[4:0];
-                port = port + 1;
-                stall = stall | hazard(r[4:0], use_D[r] ? 2'd0 : use_E[r] ? 2'd1 : 2'd2,
-                                       E_promise, M_promise, W_promise);
-            end
-        end
-    end
-
     always @(posedge clk) begin
-        if (reset) begin
-            pc <= 32'h0000_3000;
-            D_valid <= 0;
-            D_IR <= 0;
-            D_PC <= 0;
-            E_IR <= 0;
-            E_PC <= 0;
-            M_IR <= 0;
-            M_PC <= 0;
-            W_PC <= 0;
-            E_select <= 0;
-            M_select <= 0;
-            E_promise <= 0;
-            M_promise <= 0;
-            W_promise <= 0;
-        end else begin
-            if (!stall) begin
-                pc <= npc;
-                D_valid <= ~|annul_en;
-                D_IR <= ins;
-                D_PC <= pc;
-            end
-            E_select <= stall ? {N{1'b0}} : D_select;
-            E_promise <= stall ? 0 : next_E;
-            E_IR <= D_IR;
-            E_PC <= D_PC;
-            M_select <= E_select;
-            M_promise <= next_M;
-            M_IR <= E_IR;
-            M_PC <= E_PC;
-            W_promise <= next_W;
-            W_PC <= M_PC;
-        end
+        if (reset) pc <= 32'h0000_3000;
+        else if (!stall) pc <= npc;
     end
-
+endmodule
 )RTL";
-    for (unsigned i = 0; i < instructionCount; ++i) {
-        out << "    assign D_select[" << i << "] = D_valid && matches[" << i << ']';
-        if (i == 1) out << " && !matches[0]";
-        if (i > 1) out << " && !(|matches[" << i - 1 << ":0])";
-        out << ";\n";
-        out << "    mdr_instruction_" << i << " instruction_" << i << "(\n"
-            << "        .clk(clk), .d_on(D_select[" << i << "]), .e_on(E_select[" << i
-            << "]), .m_on(M_select[" << i << "]),\n"
-            << "        .d_ins(D_IR), .e_ins(E_IR), .m_ins(M_IR), .d_pc(D_PC), .e_pc(E_PC), .m_pc(M_PC),\n"
-            << "        .ep(E_promise), .mp(M_promise), .wp(W_promise), .word(DM_RD),\n"
-            << "        .read_addr(read_addr), .read_data(read_data), .matched(matches[" << i << "]),\n"
-            << "        .req_d(request_d[" << i << "]), .req_e(request_e[" << i << "]), .req_m(request_m[" << i
-            << "]),\n"
-            << "        .out_d(d_result[" << i << "]), .out_e(e_result[" << i << "]), .out_m(m_result[" << i
-            << "]),\n"
-            << "        .do_jump(jump_en[" << i << "]), .do_annul(annul_en[" << i << "]), .dest(jump_addr[" << i
-            << "]),\n"
-            << "        .addr(mem_addr[" << i << "]), .data(mem_data[" << i << "]), .store(mem_we[" << i << "])\n"
-            << "    );\n";
-    }
-    out << "endmodule\n";
     return out.str();
 }
 

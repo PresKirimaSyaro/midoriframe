@@ -9,8 +9,9 @@
 namespace {
 
 void usage(std::ostream& out) {
-    out << "Usage: mdrframe [--emit=ir|deps] [--p6-narrow-writes] [-o file] input.mdr\n"
-           "       mdrframe --emit=verilog -o directory [--program code.txt] input.mdr\n";
+    out << "Usage: mdrframe [--emit=verilog] [-o directory] [--program code.txt] input.mdr\n"
+           "       mdrframe --emit=ir|deps [--p6-narrow-writes] [-o file] input.mdr\n"
+           "Default: generate a Verilog project in <input-stem>.rtl.\n";
 }
 
 int run(int argc, char** argv) {
@@ -18,7 +19,7 @@ int run(int argc, char** argv) {
     std::filesystem::path output;
     std::filesystem::path programImage;
     enum class Emit { Ir, Dependencies, Verilog };
-    auto emit = Emit::Ir;
+    auto emit = Emit::Verilog;
     mdr::Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -40,8 +41,10 @@ int run(int argc, char** argv) {
         return 2;
     }
     if (!input.has_extension() && !std::filesystem::exists(input)) input += ".mdr";
-    if (emit == Emit::Verilog && output.empty())
-        throw std::runtime_error("--emit=verilog requires an output directory (-o)");
+    if (emit == Emit::Verilog && output.empty()) {
+        output = input.stem();
+        output += ".rtl";
+    }
     if (emit != Emit::Verilog && !programImage.empty())
         throw std::runtime_error("--program requires --emit=verilog");
     if (!output.empty() && std::filesystem::exists(output) && std::filesystem::equivalent(input, output))

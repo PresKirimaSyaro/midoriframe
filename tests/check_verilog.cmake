@@ -5,12 +5,23 @@ if(DYNAMIC)
     file(READ "${EXAMPLES}/p5.mdr" base)
     set(input "${OUT}/combined.mdr")
     file(WRITE "${input}" "${conditional}\n${lrm}\n${base}")
+    file(APPEND "${input}" [=[
+bit_write {
+    match(ins[31:26] == 6'h3f);
+    E {
+        result: 32 = grf_read(5'd1);
+        result[0] = 1'b1;
+        update 32'd1 << 5'd2;
+        yield result;
+    }
+}
+]=])
 else()
     set(input "${EXAMPLES}/p5.mdr")
 endif()
 
 execute_process(
-    COMMAND "${MDRFRAME}" --emit=verilog -o "${OUT}" --program "${IMAGE}" "${input}"
+    COMMAND "${MDRFRAME}" -o "${OUT}" --program "${IMAGE}" "${input}"
     RESULT_VARIABLE result ERROR_VARIABLE error
 )
 if(NOT result EQUAL 0)
@@ -21,6 +32,18 @@ file(SHA256 "${TB}" original)
 file(SHA256 "${OUT}/mips_tb.v" generated)
 if(NOT original STREQUAL generated)
     message(FATAL_ERROR "Generated testbench differs from the P5 testbench")
+endif()
+
+file(READ "${OUT}/mips.v" top)
+foreach(stage IN ITEMS FDreg DEreg EMreg MWreg)
+    if(NOT EXISTS "${OUT}/${stage}.v" OR NOT top MATCHES "${stage}[^;]*${stage}\\(")
+        message(FATAL_ERROR "A dedicated ${stage} instance is required")
+    endif()
+endforeach()
+file(READ "${OUT}/Controller.v" control)
+if(NOT top MATCHES "Controller Controller\\(" OR NOT control MATCHES "wire ins_add"
+        OR NOT control MATCHES "case \\(1'b1\\)" OR control MATCHES "always @\\(posedge")
+    message(FATAL_ERROR "Expected shared combinational Controller and named decode flags")
 endif()
 
 file(REMOVE "${OUT}/generated-test.vvp" "${OUT}/wave.vcd")

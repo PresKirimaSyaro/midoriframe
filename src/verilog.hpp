@@ -4,7 +4,6 @@
 
 #include <filesystem>
 #include <string>
-#include <string_view>
 
 namespace mdr {
 
@@ -12,8 +11,15 @@ void emitVerilog(const ModuleIR& module, const std::filesystem::path& directory,
                  const std::filesystem::path& programImage = {});
 
 namespace rtl {
-std::string lane(const InstructionIR& ir, unsigned index, unsigned ports);
-std::string top(unsigned instructionCount, unsigned ports);
+struct PipelineLayout {
+    unsigned opBits;
+    unsigned rfPorts;
+    unsigned deBits = 1;
+    unsigned emBits = 1;
+};
+
+std::string controller(const ModuleIR& module, PipelineLayout& layout);
+std::string top(const PipelineLayout& layout);
 std::string hex32(std::uint32_t value);
 }
 

@@ -15,23 +15,33 @@ ctest --test-dir build --output-on-failure
 .\build\mdrframe.exe --emit=ir examples\lrm.mdr -o build\lrm.mdrir
 ```
 
-在其他环境可以省略 `-G` 或选择本机 CMake 生成器。默认输出完整 IR 到标准输出。`--emit=deps` 保留解释依赖所需的表达式，省去无关节点和源码坐标。若输入名没有扩展名且路径不存在，程序尝试附加 `.mdr`。显式提供路径时也可以读取先前的 `.dsl` 样例。
+在其他环境可以省略 `-G` 或选择本机 CMake 生成器。默认在当前目录生成 `<输入文件名>.rtl/`，例如 `p5.rtl/`。`--emit=ir` 输出完整 IR，`--emit=deps` 输出依赖表，默认写到标准输出。若输入名没有扩展名且路径不存在，程序尝试附加 `.mdr`。显式提供路径时也可以读取先前的 `.dsl` 样例。
 
 P5 默认使用二参数整字写 `dm_write(addr, val)`，整字访存忽略地址低两位。若要分析早期 P6 样例中的字节或半字写，显式加 `--p6-narrow-writes`。
 
 ## 生成和仿真 P5 工程
 
 ```powershell
-.\build\mdrframe.exe --emit=verilog -o build\p5 --program tests\p5_smoke.hex examples\p5.mdr
+.\build\mdrframe.exe -o build\p5 --program tests\p5_smoke.hex examples\p5.mdr
 Push-Location build\p5
 iverilog -g2005 -s mips_tb -o sim.vvp -f files.f
 vvp sim.vvp
 Pop-Location
 ```
 
-`-o` 指向生成目录。生成文件包括 `mips.v`、`ISA.v`、独立的 IM、DM、RF、Promise 定义、原 P5 的 `mips_tb.v` 和仿真文件清单。IM 有 4096 个 32 位字，起始地址为 `0x3000`。`--program` 将十六进制程序镜像复制为 `code.txt`。省略该选项时保留目录中已有的 `code.txt`，首次生成则填充零指令。请在生成目录中运行仿真，使 testbench 和 IM 能找到 `wave.vcd` 与 `code.txt` 的相对路径。
+`-o` 指定工程目录。`mips.v` 连接取指、`FDreg`、`DEreg`、`EMreg`、`MWreg` 与 `Controller`。`Controller.v` 在 D 从 IR 译码，生成 `ins_add`、`ins_sub` 等单比特控制标志，再用各流水级的指令标志选择计算与副作用。`rs`、`rt`、`rd` 等编码字段、RF 读口、转发及阻塞逻辑均由同一数据通路共用。跨级计算结果按使用级分配寄存器，D→E 和 E→M 各自按指令中所需的最大宽度复用存储。工程还包含 IM、DM、RF、Promise 定义、原 P5 的 `mips_tb.v` 和仿真文件清单。
 
-DM 有 3072 个 32 位字，复位清零，支持整字写及整字、半字、字节读。`--p6-narrow-writes` 可用于 IR 和依赖分析，P5 Verilog 后端会拒绝窄写。寄存器写回和整字存储沿用 P5 日志格式。CMake 找到 `iverilog` 和 `vvp` 时，CTest 同时运行原 testbench 下的基础流水线和动态 Promise 回归。
+IM 有 4096 个 32 位字，起始地址为 `0x3000`。`--program` 将十六进制程序镜像复制为 `code.txt`。省略该选项时保留已有的 `code.txt`，首次生成则填充零指令。在生成目录运行仿真时，IM 从该目录读取 `code.txt`，testbench 在同一目录保存 `wave.vcd`。
+
+DM 有 3072 个 32 位字，复位清零，支持整字写及整字、半字、字节读。`--p6-narrow-writes` 可用于 IR 和依赖分析，P5 Verilog 后端会拒绝窄写。跳转与清槽只在 D 级执行，DM 只在 M 级读写。寄存器写回和整字存储沿用 P5 日志格式。CMake 找到 `iverilog` 和 `vvp` 时，CTest 同时运行原 testbench 下的基础流水线和动态 Promise 回归。
+
+### 与手写 P5 逐拍对照
+
+```powershell
+python tests/compare_p5.py --mdrframe build/mdrframe.exe --p5 D:/Dcode/co/p5
+```
+
+脚本给两个实现加载同一份指令镜像，复位后逐拍比较取指 PC、D 级指令和 `stall`，并比较同拍的寄存器与内存写入。脚本使用独立监视 testbench，原工程的文件直接复制到测试目录。日志保存于 `build/p5-diff/`。
 
 ## 输出约定
 

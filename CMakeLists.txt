@@ -8,11 +8,11 @@ add_executable(mdrframe
     src/analysis.cpp
     src/print.cpp
     src/verilog.cpp
-    src/verilog_lane.cpp
+    src/verilog_controller.cpp
     src/verilog_top.cpp
 )
 set(rtl_resources "")
-foreach(file IN ITEMS IM.v DM.v RF.v Promise.vh mips_tb.v)
+foreach(file IN ITEMS IM.v DM.v RF.v FDreg.v DEreg.v EMreg.v MWreg.v Promise.vh mips_tb.v)
     set(path "${CMAKE_CURRENT_SOURCE_DIR}/rtl/${file}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
     file(READ "${path}" bytes HEX)
@@ -58,6 +58,12 @@ if(BUILD_TESTING)
         "tuse=2" "rf-address+candidate" "ready_by=M->W")
     check_output(conditional_ready conditional "tuse=1" "decode_enable=!"
         "ready_by=E->M" "ready_by=M->W")
+
+    add_test(NAME memory_stage COMMAND "${CMAKE_COMMAND}"
+        "-DMDRFRAME=$<TARGET_FILE:mdrframe>"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/memory-stage"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_memory_stage.cmake"
+    )
 
     find_program(MDR_IVERILOG iverilog)
     find_program(MDR_VVP vvp)
