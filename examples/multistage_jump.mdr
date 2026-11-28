@@ -1,0 +1,63 @@
+beqe {
+    match(ins[31:26] == 6'h3c);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    off: 16 = ins[15:0];
+    extoffset: 32 = {{14{off[15]}}, off, 2'b00};
+
+    E {
+        if (grf_read(rs) == grf_read(rt))
+            jump(pc + 32'd4 + extoffset);
+    }
+}
+
+jm {
+    match(ins[31:26] == 6'h3d);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    off: 16 = ins[15:0];
+    extoff: 32 = {{16{off[15]}}, off};
+    addr: 32;
+
+    E {
+        addr = grf_read(rs) + extoff;
+    }
+    M {
+        target: 32 = dm_read(addr, 4);
+        if (target == grf_read(rt))
+            jump(target);
+    }
+}
+
+bdem {
+    match(ins[31:26] == 6'h3e);
+    rs: 5 = ins[25:21];
+    rt: 5 = ins[20:16];
+    rd: 5 = ins[15:11];
+
+    D {
+        if (grf_read(rs) != 0) jump(pc + 32'd20);
+    }
+    E {
+        if (grf_read(rt) != 0) jump(pc + 32'd24);
+    }
+    M {
+        if (grf_read(rd) != 0) jump(pc + 32'd28);
+    }
+}
+
+bdemclr {
+    match(ins[31:26] == 6'h3f);
+    rt: 5 = ins[20:16];
+
+    D {
+        if (ins[0]) annul_delay_slot();
+    }
+    E {
+        if (ins[1]) annul_delay_slot();
+    }
+    M {
+        if (ins[2]) annul_delay_slot();
+        if (grf_read(rt) != 0) jump(pc + 32'd28);
+    }
+}

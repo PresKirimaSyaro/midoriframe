@@ -4,9 +4,9 @@ midoriframe 把一份描述 MIPS 指令的 `.mdr` 文件编译成 BUAA CO P5 风
 
 ## 使用限制
 
-每条动态指令最多写回一个通用寄存器（GPR）。候选目标可以在流水线中逐步缩小，但到写回时必须只剩一个目标，或者取消写回。每条执行路径最多访问一次数据存储器。跳转和清槽只能在 D 级执行，DM 读写只能在 M 级执行，生成的 P5 工程只支持整字写入。
+每条动态指令最多写回一个通用寄存器（GPR）。候选目标可以在流水线中逐步缩小，但到写回时必须只剩一个目标，或者取消写回。每条执行路径最多访问一次数据存储器。DM 读写只能在 M 级执行，生成的 P5 工程只支持整字写入。D、E、M 级都可以跳转或清槽。同一条指令里，跳转只能写在最后一个清槽操作所在的流水级或更晚的级。
 
-编译器每次读取一个 `.mdr` 文件。`for` 循环必须能在编译期展开。当前 DSL 范围限于定宽组合计算和 P5 指令级操作，暂未提供数组、用户函数、`while`、`case`、多周期乘除、HI/LO、中断或异常。完整约束见 [SPEC.md](SPEC.md)。
+编译器每次读取一个 `.mdr` 文件。`for` 循环须能在编译期展开。DSL 限于定宽组合计算和 P5 指令级操作，不提供数组、用户函数、`while`、`case`、多周期乘除、HI/LO、中断或异常。完整约束见 [SPEC.md](SPEC.md)。
 
 
 ## 快速开始
@@ -66,10 +66,10 @@ lw {
 | `D {...}`、`E {...}`、`M {...}` | 表明每一流水级的处理逻辑，不用的级可以省略 |
 | `if / else`、`for` | 主体可写一条语句或大括号块。`for` 在编译期展开，支持倒序和跳步 |
 | `grf_read(r)` | `GPR[r]` 寄存器的值 |
-| `dm_read(addr, size)` | 必须位于 M 级。读取 DM 在 `addr[31:2]` 地址处 `size` 个字节。目前 p5 只支持 `size = 4` 整字读取 |
-| `dm_write(addr, val)` | 必须位于 M 级。向 DM 的 addr[31:2] 位置写入32 位 val |
-| `jump(addr)` | 必须位于 D 级。进行跳转，在延迟槽后跳转到 `addr` |
-| `annul_delay_slot()` | 必须位于 D 级。清空延迟槽 |
+| `dm_read(addr, size)` | 在 M 级按字节地址读取 DM。`size` 须为常量 1、2 或 4 |
+| `dm_write(addr, val)` | 在 M 级写入 32 位整字，忽略 `addr` 的低两位 |
+| `jump(addr)` | 可写在 D、E、M 级。默认执行延迟槽，再从 `addr` 继续 |
+| `annul_delay_slot()` | 可写在 D、E、M 级。清空本条指令的延迟槽 |
 | `update bitmap` | 指定可能的 GPR 写入目标。首次更新设定目标集合，后续取交集 |
 | `yield value` | 产生写入 GPR 目标的值 |
 
@@ -95,7 +95,7 @@ python tests/compare_p5.py --mdrframe build/mdrframe --p5 /path/to/handwritten-p
 
 ## 练习题示例
 
-下面把 P5 题目的行为 RTL 和对应的 MDR 放在一起。RTL 里的 `GRF` 表示旧寄存器值，`DM` 按字索引，`PC` 是本条指令地址，`next_pc` 是延迟槽后的取指地址。每段 MDR 都可以保存成单独的 `.mdr` 文件，也可以加到 [P5 基础指令集](examples/p5.mdr) 中。更多题例见 [SPEC.md](SPEC.md)。
+以下是 P5 练习题和自拟题的行为 RTL 与 MDR 实现。RTL 中的 `GRF` 表示旧寄存器值，`DM` 按字索引，`PC` 是本条指令地址，`next_pc` 是延迟槽后的取指地址。每段 MDR 都可以保存为单独的 `.mdr` 文件，也可以加入基础指令集。[P5 基础指令集](examples/p5.mdr)
 
 ### P5-Q02 · bgezall
 
@@ -209,6 +209,45 @@ lwxsel {
         yield word;
         if (mixed[31]) update 32'd1 << rt;
         else update 32'd1 << mixed[3:0];
+    }
+}
+```
+
+### 自拟题 · bemclr
+
+编码为 `111111 rs base 000000000000000 clr`。若 `GRF[rs]` 非零，则在 E 级跳转到 `PC + 16`。M 级按字节地址 `GRF[base]` 读取 DM 整字，忽略地址低两位。若 E 级未跳转且读出的字非零，则在 M 级跳转到 `PC + 24`。若两级均未跳转，则从 `PC + 8` 继续取指。`clr` 为 1 时取消延迟槽，适用于上述三种结果。
+
+**题面 RTL**
+
+```verilog
+annul_slot = clr;
+address = GRF[base];
+word = DM[address[31:2]];
+if (GRF[rs] != 0)
+    next_pc = PC + 32'd16;
+else if (word != 0)
+    next_pc = PC + 32'd24;
+else
+    next_pc = PC + 32'd8;
+```
+
+**对应的 MDR**
+
+```mdr
+bemclr {
+    match(ins[31:26] == 6'h3f && ins[15:1] == 15'd0);
+    rs: 5 = ins[25:21];
+    base: 5 = ins[20:16];
+    clr: 1 = ins[0];
+
+    E {
+        if (clr) annul_delay_slot();
+        if (grf_read(rs) != 0) jump(pc + 32'd16);
+    }
+    M {
+        addr: 32 = grf_read(base);
+        word: 32 = dm_read(addr, 4);
+        if (word != 0) jump(pc + 32'd24);
     }
 }
 ```

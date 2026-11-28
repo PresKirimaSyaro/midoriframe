@@ -59,7 +59,9 @@ struct InstructionCode {
     std::string name;
     std::array<std::string, 3> match, localDeclarations, procedures, promise;
     std::array<std::vector<Drive>, 3> requests;
-    std::vector<Drive> jumps, annuls, addresses, stores;
+    std::array<std::vector<Drive>, 3> jumps, annuls;
+    std::array<std::vector<Drive>, 2> laterControl;
+    std::vector<Drive> addresses, stores;
     std::array<std::vector<std::string>, 2> payload;
     std::array<std::vector<Drive>, 2> payloadDrivers;
     std::array<unsigned, 2> payloadBits{};
@@ -284,12 +286,31 @@ private:
     }
 
     void control() {
+        std::array<std::string, 3> earlierJump;
         for (const auto& e : ir_.effects) {
-            if (e.op == "jump") {
-                code_.jumps.push_back({guard(e.guard, Stage::D), get(e.operands[0], Stage::D)});
-            } else if (e.op == "annul_delay_slot") {
-                code_.annuls.push_back({guard(e.guard, Stage::D), ""});
+            const bool jump = e.op == "jump";
+            if (!jump && e.op != "annul_delay_slot") continue;
+
+            const auto index = static_cast<unsigned>(e.stage);
+            auto condition = guard(e.guard, e.stage);
+            if (jump) {
+                // When independent conditions overlap, the first jump in this stage wins.
+                auto& earlier = earlierJump[index];
+                auto select = condition;
+                if (!earlier.empty()) {
+                    const auto previous = wire(e.stage, {1}, earlier);
+                    select = "(" + condition + ") && !" + previous;
+                    condition = previous + " || (" + condition + ")";
+                }
+                code_.jumps[index].push_back({std::move(select), get(e.operands[0], e.stage)});
+                earlier = std::move(condition);
+            } else {
+                code_.annuls[index].push_back({std::move(condition), ""});
             }
+
+            // Keep the fetch slot held while any later redirect or annul is still possible.
+            for (unsigned previous = 0; previous < index; ++previous)
+                code_.laterControl[previous].push_back({guard(e.guard, static_cast<Stage>(previous), true), ""});
         }
     }
 
@@ -619,8 +640,7 @@ void emitPorts(std::ostream& out, Stage stage, const PipelineLayout& layout) {
             << "    output reg [" << ports * 5 - 1 << ":0] read_addr,\n"
             << "    output [" << rfBits - 1 << ":0] d_rf_next,\n"
             << "    output [" << layout.deBits - 1 << ":0] next_de_payload,\n"
-            << "    output [31:0] req_d, req_e, req_m, dest,\n"
-            << "    output do_jump, do_annul,\n";
+            << "    output [31:0] req_d, req_e, req_m,\n";
         break;
     case Stage::E:
         out << "    input [`MDR_PW-1:0] ep, mp, wp,\n"
@@ -639,6 +659,8 @@ void emitPorts(std::ostream& out, Stage stage, const PipelineLayout& layout) {
         break;
     default: break;
     }
+    out << "    output [31:0] dest,\n    output do_jump, do_annul,\n";
+    if (stage != Stage::M) out << "    output may_control_later,\n";
     out << "    output reg [`MDR_PW-1:0] promise_out\n);\n";
 }
 
@@ -677,15 +699,19 @@ std::array<std::string, 3> controllers(const ModuleIR& module, PipelineLayout& l
                 signals.emit("req_" + stageTag(use), 32, [use](const InstructionCode& code) -> const auto& {
                     return code.requests[static_cast<unsigned>(use)];
                 });
-            signals.emit("do_jump", 1, [](const InstructionCode& code) -> const auto& { return code.jumps; }, true);
-            signals.emit("do_annul", 1, [](const InstructionCode& code) -> const auto& { return code.annuls; }, true);
-            signals.emit("dest", 32, [](const InstructionCode& code) -> const auto& { return code.jumps; });
         } else if (stage == Stage::M) {
             signals.emit("addr", 32, [](const InstructionCode& code) -> const auto& { return code.addresses; });
             signals.emit("data", 32, [](const InstructionCode& code) -> const auto& { return code.stores; });
             signals.emit("store", 1, [](const InstructionCode& code) -> const auto& { return code.stores; }, true);
         }
+        const auto jumps = [index](const InstructionCode& code) -> const auto& { return code.jumps[index]; };
+        signals.emit("do_jump", 1, jumps, true);
+        signals.emit("do_annul", 1, [index](const InstructionCode& code) -> const auto& { return code.annuls[index]; }, true);
+        signals.emit("dest", 32, jumps);
         if (stage != Stage::M) {
+            signals.emit("may_control_later", 1, [index](const InstructionCode& code) -> const auto& {
+                return code.laterControl[index];
+            }, true);
             const auto size = stage == Stage::D ? layout.deBits : layout.emBits;
             signals.emit(stage == Stage::D ? "next_de_payload" : "next_em_payload", size,
                 [index](const InstructionCode& code) -> const auto& { return code.payloadDrivers[index]; });

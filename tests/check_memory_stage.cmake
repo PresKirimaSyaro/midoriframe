@@ -12,5 +12,11 @@ function(reject name body diagnostic)
 endfunction()
 
 reject(early_dm "D { jump(dm_read(32'd0, 4)); }" "dm_read is only available in M")
-reject(late_jump "M { jump(dm_read(32'd0, 4)); }" "jump is only available in D")
+reject(early_dm_e "E { jump(dm_read(32'd0, 4)); }" "dm_read is only available in M")
+reject(jump_before_annul "D { if (ins[0]) jump(pc); } E { if (!ins[0]) annul_delay_slot(); }"
+    "jump in D precedes the last annul_delay_slot in E")
+reject(jump_before_last_annul "E { annul_delay_slot(); jump(pc); } M { if (ins[0]) annul_delay_slot(); }"
+    "jump in E precedes the last annul_delay_slot in M")
+reject(jump_before_dead_annul "D { jump(pc); } M { if (0) annul_delay_slot(); }"
+    "jump in D precedes the last annul_delay_slot in M")
 

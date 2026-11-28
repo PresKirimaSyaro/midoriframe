@@ -88,6 +88,14 @@ if(BUILD_TESTING)
         endfunction()
         check_verilog(rtl_p5 p5_smoke OFF)
         check_verilog(rtl_dynamic dynamic_promise ON)
+        add_test(NAME rtl_multistage_jump COMMAND "${CMAKE_COMMAND}"
+            "-DMDRFRAME=$<TARGET_FILE:mdrframe>"
+            "-DIVERILOG=${MDR_IVERILOG}" "-DVVP=${MDR_VVP}"
+            "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rtl_multistage_jump"
+            "-DEXAMPLES=${CMAKE_CURRENT_SOURCE_DIR}/examples"
+            "-DTB=${CMAKE_CURRENT_SOURCE_DIR}/tests/multistage_jump_tb.v"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_multistage_jump.cmake"
+        )
     endif()
 endif()
 

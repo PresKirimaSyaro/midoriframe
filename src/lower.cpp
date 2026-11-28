@@ -30,6 +30,7 @@ public:
     }
 
     InstructionIR run() {
+        validateControlStages();
         const auto at = program_.expr(source_.match).location;
         auto beforeMatch = [&](const Stmt& stmt) {
             return std::tie(stmt.location.line, stmt.location.column) < std::tie(at.line, at.column);
@@ -58,6 +59,30 @@ public:
     }
 
 private:
+    void validateControlStages() const {
+        const Expr* firstJump = nullptr;
+        Stage firstJumpStage = Stage::W;
+        Stage lastAnnulStage = Stage::Decode;
+        auto scan = [&](auto&& self, const std::vector<Stmt>& statements, Stage stage) -> void {
+            for (const auto& stmt : statements) {
+                if (stmt.kind == StmtKind::Effect) {
+                    const auto& call = program_.expr(stmt.first);
+                    if (call.text == "jump" && stage < firstJumpStage) {
+                        firstJump = &call;
+                        firstJumpStage = stage;
+                    }
+                    if (call.text == "annul_delay_slot") lastAnnulStage = std::max(lastAnnulStage, stage);
+                }
+                self(self, stmt.body, stage);
+                self(self, stmt.otherwise, stage);
+            }
+        };
+        for (const auto& stage : source_.stages) scan(scan, stage.statements, stage.stage);
+        if (firstJump && firstJumpStage < lastAnnulStage)
+            throw Error(firstJump->location, std::string("jump in ") + stageName(firstJumpStage) +
+                        " precedes the last annul_delay_slot in " + stageName(lastAnnulStage));
+    }
+
     const Value& value(ValueId id) const { return ir_.value(id); }
     ValueId make(std::string op, std::string detail, Type type, Location at,
                  std::vector<ValueId> operands = {}, unsigned sources = 0) {
@@ -354,7 +379,7 @@ private:
         auto category = [](std::string_view operation) -> std::string_view {
             if (operation.starts_with("dm.")) return "memory access";
             if (operation == "promise.yield") return "yield";
-            if (operation == "jump" || operation == "annul_delay_slot") return operation;
+            if (operation == "jump") return operation;
             return {};
         };
         const auto resource = category(op);
@@ -365,7 +390,7 @@ private:
                 });
             };
             for (const auto& previous : ir_.effects) {
-                if (category(previous.op) == resource &&
+                if (category(previous.op) == resource && (op != "jump" || previous.stage == stage_) &&
                     (implies(previous.guard, guard_) || implies(guard_, previous.guard)))
                     throw Error(at, "multiple " + std::string(resource) + " operations on a path");
             }
@@ -375,7 +400,6 @@ private:
 
     void effectCall(const Expr& expr) {
         if (expr.text == "jump" || expr.text == "annul_delay_slot") {
-            requireStage(expr, Stage::D);
             arity(expr, expr.text == "jump" ? 1 : 0);
             std::vector<ValueId> args;
             if (!expr.operands.empty())
